@@ -1,6 +1,11 @@
 {
   "name": "terabox-puppeteer-backend",
+  "version": "1.0.0",
+  "description": "Terabox backend",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node index.js"
   },
