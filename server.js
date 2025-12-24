@@ -5,27 +5,71 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => {
-  res.send("Puppeteer backend is running ✅");
+  res.send("Terabox Puppeteer Backend is running ✅");
 });
 
-app.get("/test", async (req, res) => {
+app.get("/fetch", async (req, res) => {
+  const shareUrl = req.query.url;
+
+  if (!shareUrl || !shareUrl.includes("terabox")) {
+    return res.json({ error: "Invalid Terabox URL" });
+  }
+
+  let browser;
+
   try {
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: "new",
-      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+      ]
     });
 
     const page = await browser.newPage();
-    await page.goto("https://example.com", { waitUntil: "domcontentloaded" });
-    const title = await page.title();
 
-    await browser.close();
-    res.json({ success: true, title });
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+    );
+
+    await page.goto(shareUrl, {
+      waitUntil: "networkidle2",
+      timeout: 60000
+    });
+
+    // IMPORTANT: allow Terabox JS to fully run
+    await page.waitForTimeout(8000);
+
+    // Extract direct download link from page context
+    const result = await page.evaluate(() => {
+      const links = [...document.querySelectorAll("a")]
+        .map(a => a.href)
+        .filter(h => h && h.includes("download"));
+
+      return links.length ? links[0] : null;
+    });
+
+    if (!result) {
+      throw new Error("Download link not found (Terabox JS blocked)");
+    }
+
+    res.json({
+      success: true,
+      download: result
+    });
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.json({
+      error: "Failed to generate download link",
+      details: err.message
+    });
+  } finally {
+    if (browser) await browser.close();
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("Server running on port", PORT);
 });
