@@ -35,39 +35,50 @@ app.get("/fetch", async (req, res) => {
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
     );
 
-    // Speed + anti-bot
-    await page.setRequestInterception(true);
-    page.on("request", req => {
-      const type = req.resourceType();
-      if (["image", "font", "media"].includes(type)) {
-        req.abort();
-      } else {
-        req.continue();
-      }
+    let finalDownloadUrl = null;
+
+    // 🔥 INTERCEPT RESPONSES
+    page.on("response", async response => {
+      try {
+        const url = response.url();
+
+        // Terabox API that returns download link
+        if (
+          url.includes("/share/list") ||
+          url.includes("dlink") ||
+          url.includes("download")
+        ) {
+          const text = await response.text();
+
+          // Match real data.terabox.app link
+          const match = text.match(
+            /https:\/\/data\.terabox\.app\/file\/[^"&]+/
+          );
+
+          if (match) {
+            finalDownloadUrl = match[0];
+          }
+        }
+      } catch (_) {}
     });
 
-    // 🔥 CRITICAL FIX
     await page.goto(shareUrl, {
       waitUntil: "domcontentloaded",
       timeout: 0
     });
 
-    // Allow JS execution
-    await new Promise(resolve => setTimeout(resolve, 8000));
+    // wait for API responses
+    await new Promise(resolve => setTimeout(resolve, 10000));
 
-    const downloadUrl = await page.evaluate(() => {
-      const html = document.documentElement.innerHTML;
-      const match = html.match(/https:\/\/data\.terabox\.app\/file\/[^"&]+/);
-      return match ? match[0] : null;
-    });
-
-    if (!downloadUrl) {
-      throw new Error("Download link not found");
+    if (!finalDownloadUrl) {
+      throw new Error(
+        "Terabox API response intercepted, but download URL not found"
+      );
     }
 
     res.json({
       success: true,
-      download: downloadUrl
+      download: finalDownloadUrl
     });
 
   } catch (err) {
