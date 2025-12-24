@@ -1,8 +1,28 @@
 import express from "express";
 import puppeteer from "puppeteer-core";
+import fs from "fs";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+function findChromiumExecutable() {
+  const candidates = [
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome-beta"
+  ];
+
+  for (const path of candidates) {
+    if (fs.existsSync(path)) {
+      console.log("✅ Found Chromium at:", path);
+      return path;
+    }
+  }
+
+  throw new Error("Chromium not found on system");
+}
 
 app.get("/", (req, res) => {
   res.send("Terabox Puppeteer Backend is running ✅");
@@ -10,15 +30,16 @@ app.get("/", (req, res) => {
 
 app.get("/fetch", async (req, res) => {
   const shareUrl = req.query.url;
-
   if (!shareUrl || !shareUrl.includes("terabox")) {
     return res.status(400).json({ error: "Invalid Terabox link" });
   }
 
   let browser;
   try {
+    const executablePath = findChromiumExecutable();
+
     browser = await puppeteer.launch({
-      executablePath: "/usr/bin/chromium",
+      executablePath,
       headless: "new",
       args: [
         "--no-sandbox",
@@ -30,16 +51,11 @@ app.get("/fetch", async (req, res) => {
     });
 
     const page = await browser.newPage();
-
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
     );
 
-    await page.goto(shareUrl, {
-      waitUntil: "networkidle2",
-      timeout: 60000
-    });
-
+    await page.goto(shareUrl, { waitUntil: "networkidle2", timeout: 60000 });
     await page.waitForTimeout(6000);
 
     const downloadUrl = await page.evaluate(() => {
@@ -52,10 +68,7 @@ app.get("/fetch", async (req, res) => {
       throw new Error("Download link not found");
     }
 
-    res.json({
-      success: true,
-      download: downloadUrl
-    });
+    res.json({ success: true, download: downloadUrl });
 
   } catch (err) {
     res.status(500).json({
