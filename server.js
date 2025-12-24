@@ -1,5 +1,5 @@
 import express from "express";
-import puppeteer from "puppeteer";
+import puppeteer from "puppeteer-core";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,19 +12,20 @@ app.get("/fetch", async (req, res) => {
   const shareUrl = req.query.url;
 
   if (!shareUrl || !shareUrl.includes("terabox")) {
-    return res.json({ error: "Invalid Terabox URL" });
+    return res.status(400).json({ error: "Invalid Terabox link" });
   }
 
   let browser;
-
   try {
     browser = await puppeteer.launch({
+      executablePath: "/usr/bin/chromium-browser",
       headless: "new",
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
-        "--disable-gpu"
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled"
       ]
     });
 
@@ -39,29 +40,25 @@ app.get("/fetch", async (req, res) => {
       timeout: 60000
     });
 
-    // IMPORTANT: allow Terabox JS to fully run
-    await page.waitForTimeout(8000);
+    await page.waitForTimeout(6000);
 
-    // Extract direct download link from page context
-    const result = await page.evaluate(() => {
-      const links = [...document.querySelectorAll("a")]
-        .map(a => a.href)
-        .filter(h => h && h.includes("download"));
-
-      return links.length ? links[0] : null;
+    const downloadUrl = await page.evaluate(() => {
+      const html = document.documentElement.innerHTML;
+      const match = html.match(/https:\/\/data\.terabox\.app\/file\/[^"&]+/);
+      return match ? match[0] : null;
     });
 
-    if (!result) {
-      throw new Error("Download link not found (Terabox JS blocked)");
+    if (!downloadUrl) {
+      throw new Error("Download link not found");
     }
 
     res.json({
       success: true,
-      download: result
+      download: downloadUrl
     });
 
   } catch (err) {
-    res.json({
+    res.status(500).json({
       error: "Failed to generate download link",
       details: err.message
     });
@@ -71,5 +68,5 @@ app.get("/fetch", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  console.log(`Server running on port ${PORT}`);
 });
