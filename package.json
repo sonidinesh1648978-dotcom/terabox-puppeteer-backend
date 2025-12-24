@@ -1,0 +1,16 @@
+{
+  "name": "puppeteer-backend",
+  "version": "1.0.0",
+  "description": "Headless browser backend using Puppeteer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "puppeteer": "^22.8.2"
+  }
+}
