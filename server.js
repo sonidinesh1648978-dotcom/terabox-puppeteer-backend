@@ -1,13 +1,59 @@
 import express from "express";
 import puppeteer from "puppeteer";
+import fs from "fs";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+const COOKIE_FILE = "cookies.json";
 
+/* -------------------- BASIC HEALTH CHECK -------------------- */
 app.get("/", (req, res) => {
   res.send("Terabox Puppeteer Backend is running ✅");
 });
 
+/* -------------------- MANUAL LOGIN (ONE TIME) -------------------- */
+app.get("/login", async (req, res) => {
+  let browser;
+
+  try {
+    browser = await puppeteer.launch({
+      executablePath: process.env.CHROME_PATH || "/usr/bin/chromium",
+      headless: false, // MUST be false for manual login
+      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+    });
+
+    const page = await browser.newPage();
+    await page.goto("https://www.terabox.com", {
+      waitUntil: "domcontentloaded",
+      timeout: 0
+    });
+
+    res.send(`
+      <h2>Terabox Login</h2>
+      <p>Login in the opened browser window.</p>
+      <p>After successful login, CLOSE the browser window.</p>
+    `);
+
+    // Wait until browser is closed manually
+    await browser.waitForTarget(() => false);
+
+  } catch (err) {
+    res.status(500).send(err.message);
+  } finally {
+    if (browser) {
+      try {
+        const pages = await browser.pages();
+        if (pages.length > 0) {
+          const cookies = await pages[0].cookies();
+          fs.writeFileSync(COOKIE_FILE, JSON.stringify(cookies, null, 2));
+        }
+        await browser.close();
+      } catch (_) {}
+    }
+  }
+});
+
+/* -------------------- FETCH TERABOX LINK -------------------- */
 app.get("/fetch", async (req, res) => {
   const shareUrl = req.query.url;
 
@@ -35,26 +81,27 @@ app.get("/fetch", async (req, res) => {
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
     );
 
+    /* ---- LOAD SAVED LOGIN COOKIES ---- */
+    if (fs.existsSync(COOKIE_FILE)) {
+      const cookies = JSON.parse(fs.readFileSync(COOKIE_FILE, "utf8"));
+      await page.setCookie(...cookies);
+    }
+
     let finalDownloadUrl = null;
 
-    // 🔥 INTERCEPT RESPONSES
+    /* ---- INTERCEPT TERABOX API RESPONSES ---- */
     page.on("response", async response => {
       try {
         const url = response.url();
-
-        // Terabox API that returns download link
         if (
-          url.includes("/share/list") ||
-          url.includes("dlink") ||
+          url.includes("share") ||
+          url.includes("list") ||
           url.includes("download")
         ) {
           const text = await response.text();
-
-          // Match real data.terabox.app link
           const match = text.match(
             /https:\/\/data\.terabox\.app\/file\/[^"&]+/
           );
-
           if (match) {
             finalDownloadUrl = match[0];
           }
@@ -67,13 +114,11 @@ app.get("/fetch", async (req, res) => {
       timeout: 0
     });
 
-    // wait for API responses
+    // Allow Terabox JS + API calls to complete
     await new Promise(resolve => setTimeout(resolve, 10000));
 
     if (!finalDownloadUrl) {
-      throw new Error(
-        "Terabox API response intercepted, but download URL not found"
-      );
+      throw new Error("Download link not found (login may be expired)");
     }
 
     res.json({
@@ -91,6 +136,7 @@ app.get("/fetch", async (req, res) => {
   }
 });
 
+/* -------------------- START SERVER -------------------- */
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
