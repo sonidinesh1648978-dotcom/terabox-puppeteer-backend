@@ -35,13 +35,26 @@ app.get("/fetch", async (req, res) => {
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
     );
 
-    await page.goto(shareUrl, {
-      waitUntil: "networkidle2",
-      timeout: 60000
+    // Speed + anti-bot
+    await page.setRequestInterception(true);
+    page.on("request", req => {
+      const type = req.resourceType();
+      if (["image", "font", "media"].includes(type)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
     });
 
-    await new Promise(resolve => setTimeout(resolve, 6000));
-    
+    // 🔥 CRITICAL FIX
+    await page.goto(shareUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 0
+    });
+
+    // Allow JS execution
+    await new Promise(resolve => setTimeout(resolve, 8000));
+
     const downloadUrl = await page.evaluate(() => {
       const html = document.documentElement.innerHTML;
       const match = html.match(/https:\/\/data\.terabox\.app\/file\/[^"&]+/);
