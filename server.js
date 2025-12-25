@@ -53,18 +53,19 @@ app.get("/fetch", async (req, res) => {
 
   let browser;
   try {
-    // ---------- LAUNCH BROWSER (Render Safe Mode) ----------
-    browser = await puppeteer.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-web-security",
-        "--disable-blink-features=AutomationControlled"
-      ]
-    });
+   // ---------- LAUNCH BROWSER (Render Safe Mode) ----------
+browser = await puppeteer.launch({
+  headless: true,
+  executablePath: puppeteer.executablePath(),
+  args: [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-web-security",
+    "--disable-blink-features=AutomationControlled"
+  ]
+});
 
     const page = await browser.newPage();
 
