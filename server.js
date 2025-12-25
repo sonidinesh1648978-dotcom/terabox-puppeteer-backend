@@ -7,105 +7,93 @@ import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
 const app = express();
 app.use(cors());
 
-// ---------- CONFIG ----------
+// ==== CONFIG (REQUIRED FOR RENDER) ====
 const PORT = process.env.PORT || 10000;
+const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser";
 const COOKIES_PATH = path.join(__dirname, "cookies.json");
+
 const ALLOWED_DOMAINS = [
-  "1024terabox.com",
-  "teraboxurl.com",
-  "terabox.com",
-  "mirrobox.com",
-  "nephobox.com"
+  "1024terabox.com", "teraboxurl.com", "mirrobox.com",
+  "nephobox.com", "terabox.com"
 ];
 
-// ---------- ROUTES ----------
-
-// Home Test
+// ==== HOME ====
 app.get("/", (req, res) => {
-  res.json({ status: "🟢 Backend running!", usage: "/fetch?url=your_link" });
+  res.json({
+    status: "🟢 Server Online",
+    use: "/fetch?url=YOUR_LINK",
+    loginCheck: "/check-login"
+  });
 });
 
-// Main Fetch Route
+// ==== CHECK LOGIN ====
+app.get("/check-login", (req, res) => {
+  if (!fs.existsSync(COOKIES_PATH)) {
+    return res.json({ logged: false, message: "❌ No cookies.json found." });
+  }
+  res.json({ logged: true, message: "✅ Cookies detected. Ready!" });
+});
+
+// ==== FETCH DOWNLOAD ====
 app.get("/fetch", async (req, res) => {
   let url = req.query.url;
-  if (!url) return res.json({ error: "❌ Missing parameter: /fetch?url=" });
+  if (!url) return res.json({ error: "Missing: /fetch?url=" });
 
-  // Validate input link
-  if (!ALLOWED_DOMAINS.some(domain => url.includes(domain))) {
-    return res.json({ 
-      error: "❌ Invalid link!",
-      supported: ALLOWED_DOMAINS.join(", ")
-    });
-  }
-
-  // Normalize link
+  // fix link formats
   url = url
     .replace("teraboxurl.com", "1024terabox.com")
     .replace("www.terabox.com", "www.1024terabox.com")
-    .replace("terabox.com", "1024terabox.com")
-    .replace("mirrobox.com", "1024terabox.com")
-    .replace("nephobox.com", "1024terabox.com");
+    .replace("terabox.com", "1024terabox.com");
 
-  console.log("🔁 Normalized URL:", url);
+  if (!ALLOWED_DOMAINS.some(d => url.includes(d))) {
+    return res.json({ error: "❌ Unsupported Link", allowed: ALLOWED_DOMAINS });
+  }
+
+  if (!fs.existsSync(COOKIES_PATH)) {
+    return res.json({ error: "❌ Login cookies missing. Upload cookies.json" });
+  }
 
   let browser;
   try {
-   // ---------- LAUNCH BROWSER (Render Safe Mode) ----------
-browser = await puppeteer.launch({
-  headless: true,
-  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath(),
-  args: [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--disable-web-security",
-    "--disable-blink-features=AutomationControlled"
-  ]
-});
+    // === START CHROME ===
+    browser = await puppeteer.launch({
+      headless: true,
+      executablePath: CHROME_PATH,
+      args: [
+        "--no-sandbox", "--disable-dev-shm-usage",
+        "--disable-setuid-sandbox", "--disable-gpu",
+        "--single-process"
+      ],
+    });
 
     const page = await browser.newPage();
+    const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH));
+    await page.setCookie(...cookies);
 
-    // ---------- LOAD COOKIES ----------
-    if (fs.existsSync(COOKIES_PATH)) {
-      const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, "utf8"));
-      for (const cookie of cookies) {
-        await page.setCookie(cookie);
-      }
-      console.log("🍪 Cookies loaded");
-    } else {
-      console.log("⚠️ No cookies.json found, login session missing.");
-      return res.json({ error: "Not logged in. Upload cookies.json first." });
-    }
+    // === OPEN SHARE PAGE ===
+    await page.goto(url, { waitUntil: "networkidle0", timeout: 120000 });
 
-    // ---------- OPEN SHARE PAGE ----------
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 90000 });
-
-    // Wait for file load elements
-    await page.waitForSelector(".video-info-title, .filename, .mstr-share-viewer", { timeout: 60000 }).catch(() => {});
-
-    // Get file name
+    // FIXED SELECTORS
     const fileName = await page.evaluate(() =>
-      document.querySelector(".video-info-title, .filename")?.innerText || "Unknown File"
+      document.querySelector(".video-info-title,.filename,.usr-file-name")?.innerText
     );
 
-    // Attempt to extract download URL
     const downloadUrl = await page.evaluate(() => {
-      const link = document.querySelector("a[href*='data.terabox'], a[href*='file']");
-      return link ? link.href : null;
+      let a = document.querySelector("a[href*='data.terabox'],a[href*='download'],.btn-download");
+      return a ? a.href : null;
     });
 
     if (!downloadUrl) {
-      return res.json({ 
-        error: "Download link not found ⛔",
-        reason: "Maybe countdown / protection active. Refresh cookie."
+      return res.json({
+        error: "⛔ Download link not visible",
+        fix: "Open login-local.js and refresh cookies.json"
       });
     }
 
-    // ---------- SEND RESULT ----------
     res.json({
       success: true,
       file: fileName,
@@ -113,12 +101,10 @@ browser = await puppeteer.launch({
     });
 
   } catch (err) {
-    console.log("❌ SERVER ERROR:", err);
-    res.json({ error: "Failed to generate download link", details: err.message });
+    res.json({ error: "Failed to fetch", details: err.message });
   } finally {
     if (browser) await browser.close();
   }
 });
 
-// ---------- START SERVER ----------
-app.listen(PORT, () => console.log(`🚀 Running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Puppeteer RUNNING on ${PORT}`));
