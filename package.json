@@ -10,7 +10,7 @@
     "node": ">=18"
   },
   "dependencies": {
-  "express": "^4.19.2",
-  "puppeteer": "^22.8.2"
-}
+    "express": "^4.19.2",
+    "puppeteer": "^24.34.0"
+  }
 }
