@@ -11,6 +11,7 @@ yarn-error.log*
 
 # Puppeteer cookies (VERY IMPORTANT)
 cookies.json
+/node_modules
 
 # OS
 .DS_Store
