@@ -39,10 +39,25 @@ app.get("/", (req, res) => {
 
 // 🟢 Fetch Download Link Route
 app.get("/fetch", async (req, res) => {
-  const link = req.query.url;
+  let url = req.query.url;
 
-  if (!link || !link.includes("1024terabox")) {
-    return res.json({ error: "❌ Provide a valid 1024Terabox link: ?url=" });
+  if (!url) return res.json({ error: "❌ Missing ?url=" });
+
+  // Accept & normalize Terabox URLs
+  const allowedDomains = ["1024terabox.com", "teraboxurl.com", "terabox.com", "mirrobox.com", "nephobox.com"];
+  if (!allowedDomains.some(domain => url.includes(domain))) {
+    return res.json({ error: "❌ Invalid link format. Provide a Terabox URL." });
+  }
+
+  // Convert all domains to 1024Terabox
+  url = url
+    .replace("teraboxurl.com", "1024terabox.com")
+    .replace("www.terabox.com", "www.1024terabox.com")
+    .replace("terabox.com", "1024terabox.com")
+    .replace("mirrobox.com", "1024terabox.com")
+    .replace("nephobox.com", "1024terabox.com");
+
+  console.log("🔁 Normalized URL:", url);
   }
 
   try {
