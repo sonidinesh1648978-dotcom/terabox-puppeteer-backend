@@ -8,29 +8,34 @@ const __dirname = path.resolve();
 const CHROME_PATH = "/usr/bin/chromium";
 const COOKIES_PATH = path.join(__dirname, "cookies.json");
 
-// ----------------- URL FIXER -----------------
+// ------------------ URL NORMALIZER (FIXED) ------------------
 function normalizeURL(url) {
   if (!url) return null;
   url = url.trim();
 
-  // remove accidental double domains: "https://1024https://1024..."
-  url = url.replace(/1024https?:\/\/1024/gi, "https://1024terabox.com");
+  // Remove double protocol mistakes
+  url = url.replace(/https?:\/\/https?:\/\//gi, "https://");
 
-  // add missing protocol
+  // Remove "10241024" duplicate bug
+  url = url.replace(/1024https:\/\/1024/gi, "https://1024terabox.com");
+
+  // Add missing https
   if (!url.startsWith("http")) url = "https://" + url;
 
-  // convert short links → main domain ONCE
+  // Convert known short domains -> once only
   url = url
     .replace(/(https?:\/\/)?(www\.)?teraboxurl\.com/gi, "https://1024terabox.com")
     .replace(/(https?:\/\/)?(www\.)?terabox\.com/gi, "https://1024terabox.com");
 
-  // fix double https://
-  url = url.replace(/^https?:\/\/https?:\/\//, "https://");
+  // Ensure final cleaned correct format
+  if (!url.startsWith("https://1024terabox.com")) {
+    url = url.replace(/^https?:\/\/[^/]+/, "https://1024terabox.com");
+  }
 
   return url;
 }
 
-// ----------------- BROWSER LAUNCH (RENDER SAFE) -----------------
+// ------------------ BROWSER LAUNCH (RENDER SAFE) ------------------
 async function launchBrowser() {
   return await puppeteer.launch({
     headless: "new",
@@ -47,107 +52,91 @@ async function launchBrowser() {
       "--ignore-certificate-errors",
       "--window-size=1280,720",
       `--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36`,
-    ]
+    ],
   });
 }
 
-// ----------------- SAFE PAGE LOADING -----------------
+// ------------------ SAFE PAGE LOADING WITH RETRIES ------------------
 async function safeGoto(page, url) {
   const modes = ["networkidle2", "domcontentloaded", "load"];
-  for (let mode of modes) {
+  for (let m of modes) {
     try {
-      console.log("⏳ Trying load:", mode);
-      await page.goto(url, { waitUntil: mode, timeout: 60000 });
+      console.log("⏳ Trying:", m);
+      await page.goto(url, { waitUntil: m, timeout: 60000 });
       return true;
-    } catch (err) {
-      console.log("⚠️ retry:", mode);
+    } catch (e) {
+      console.log("⚠️ Failed:", m);
     }
   }
   return false;
 }
 
-// ----------------- DIAGNOSE -----------------
+// ------------------ DIAGNOSE ------------------
 app.get("/diagnose", async (req, res) => {
-  let result = {
-    chromiumPath: CHROME_PATH,
-    cookies: fs.existsSync(COOKIES_PATH) ? "✅ Found" : "❌ Missing",
-  };
+  const cookies = fs.existsSync(COOKIES_PATH) ? "✅ Found" : "❌ Missing";
   try {
     const b = await launchBrowser();
     await b.close();
-    result.launch = "🟢 OK - Chromium launched";
+    return res.json({ chromiumPath: CHROME_PATH, cookies, status: "🟢 Chromium OK" });
   } catch (e) {
-    result.launch = "❌ Failed to launch: " + e.message;
+    return res.json({ chromiumPath: CHROME_PATH, cookies, status: "❌ Browser failed", error: e.message });
   }
-  res.json(result);
 });
 
-// ----------------- MAIN API (NO CLICK, JUST EXTRACT LINK) -----------------
+// ------------------ MAIN FETCH (NO CLICK, EXTRACT ONLY) ------------------
 app.get("/fetch", async (req, res) => {
   let url = req.query.url;
-  if (!url) return res.json({ error: "❌ Missing ?url=" });
+  if (!url) return res.json({ error: "❌ Missing ?url parameter" });
 
   url = normalizeURL(url);
-  if (!url.includes("1024terabox")) {
-    return res.json({ error: "❌ Invalid link", fixed: normalizeURL(url) });
-  }
-
-  console.log("🌎 Final URL:", url);
+  console.log("🌍 Final URL:", url);
 
   const browser = await launchBrowser();
-  let page = await browser.newPage();
+  const page = await browser.newPage();
 
-  // apply cookies if login is available
+  // load cookies if login exists
   if (fs.existsSync(COOKIES_PATH)) {
     try {
       const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, "utf8"));
       await page.setCookie(...cookies);
-      console.log("🍪 Cookies Applied");
-    } catch (e) {
-      console.log("❌ Bad cookie file");
-    }
+      console.log("🍪 Cookies applied.");
+    } catch {}
   }
 
-  // prevent crash if target closes
-  page.on("close", async () => {
-    console.log("⚠️ Page closed - reopening");
-    page = await browser.newPage();
-    await safeGoto(page, url);
-  });
-
-  const opened = await safeGoto(page, url);
-  if (!opened) {
+  // load page
+  const open = await safeGoto(page, url);
+  if (!open) {
     await browser.close();
-    return res.json({ error: "❌ Page blocked or not reachable" });
+    return res.json({ error: "❌ Navigation blocked or failed to load" });
   }
 
-  await page.waitForTimeout(5000); // anti-bot wait
+  await page.waitForTimeout(5000);
 
-  // ----------------- Extract WITHOUT clicking -----------------
-  const downloadLink = await page.evaluate(() => {
+  // extract direct file URL
+  const download = await page.evaluate(() => {
     return [...document.querySelectorAll("a")]
       .map(a => a.href)
-      .find(h => h.includes("data.") && h.includes("file/"));
+      .find(x => x.includes("data.") && x.includes("file/"));
   });
 
-  if (!downloadLink) {
+  if (!download) {
     await browser.close();
-    return res.json({
-      error: "❌ No direct link found (Login may be required)",
-      note: "Run login-local.js again"
+    return res.json({ 
+      error: "❌ No direct URL found",
+      reason: "Probably cookie expired. Run login-local.js again."
     });
   }
 
   const title = await page.title();
   await browser.close();
 
-  res.json({
+  return res.json({
     success: true,
     filename: title.replace(/[^\w.-]/g, "_") + ".mp4",
-    download: downloadLink
+    download
   });
 });
 
-// ----------------- START SERVER -----------------
+// ------------------ START SERVER ------------------
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Server Live on ${PORT}`));
+app.listen(PORT, () => console.log("🚀 RUNNING on port", PORT));
