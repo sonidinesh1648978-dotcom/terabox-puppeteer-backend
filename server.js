@@ -91,9 +91,10 @@ app.get("/fetch", async (req, res) => {
   if (!url) return res.json({ error: "❌ Missing ?url=" });
 
   // AUTO FIX LINK
-  url = url
-    .replace("teraboxurl.com", "1024terabox.com")
-    .replace("terabox.com", "1024terabox.com");
+  // SAFE domain conversion (prevents 10241024terabox issue)
+if (url.includes("teraboxurl.com") || url.includes("terabox.com")) {
+  url = url.replace(/(www\.)?(teraboxurl\.com|terabox\.com)/, "1024terabox.com");
+}
 
   // DOMAIN CHECK
   if (!ALLOWED_DOMAINS.some(d => url.includes(d))) {
