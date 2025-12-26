@@ -159,9 +159,3 @@ app.get("/fetch", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 TeraBox Backend Running on PORT ${PORT}`);
 });
-  } finally {
-    if (browser) await browser.close();
-  }
-});
-
-app.listen(PORT, () => console.log(`🚀 Puppeteer RUNNING on ${PORT}`));
