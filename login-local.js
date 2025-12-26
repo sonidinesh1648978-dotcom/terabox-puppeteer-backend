@@ -26,7 +26,7 @@ const COOKIES_FILE = "./cookies.json";
   console.log("⏳ Saving cookies automatically in 30 sec...");
 
   // Wait for you to log in
-  await page.waitForTimeout(30000);
+ await new Promise(res => setTimeout(res, 30000));
 
   // Save cookies
   const cookies = await page.cookies();
