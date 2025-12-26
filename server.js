@@ -10,17 +10,17 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(cors());
 
-// === CONFIG FOR RENDER ===
+// -----------------------------------------
+// REQUIRED CONFIG
+// -----------------------------------------
 const PORT = process.env.PORT || 10000;
-// --- AUTO DETECT CHROMIUM PATH ---
-const CHROME_PATH =
-  process.env.PUPPETEER_EXECUTABLE_PATH ||
-  "/opt/render/project/.cache/puppeteer/chrome/linux-*/chrome" || // often here
-  "/opt/render/.cache/puppeteer/chrome/linux-*/chrome" ||         // fallback
-  null;
 const COOKIES_PATH = path.join(__dirname, "cookies.json");
 
-// === ACCEPTED DOMAINS ===
+// MATCHES DOCKERFILE CHROMIUM PATH
+const CHROME_PATH =
+  process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium";
+
+// SUPPORTED TeraBox MIRROR DOMAINS
 const ALLOWED_DOMAINS = [
   "1024terabox.com",
   "teraboxurl.com",
@@ -31,120 +31,122 @@ const ALLOWED_DOMAINS = [
   "www.teraboxurl.com"
 ];
 
-// === HOME ROUTE ===
+// -----------------------------------------
+// HOME ROUTE
+// -----------------------------------------
 app.get("/", (req, res) => {
   res.json({
-    status: "🟢 TeraBox Puppeteer API Running",
-    endpoints: {
+    status: "🟢 Backend Running",
+    usage: {
       diagnose: "/diagnose",
-      loginCheck: "/check-login",
+      login: "/check-login",
       fetch: "/fetch?url=YOUR_LINK"
     }
   });
 });
 
-// === CHECK LOGIN (COOKIES.JSON) ===
+// -----------------------------------------
+// COOKIE CHECK
+// -----------------------------------------
 app.get("/check-login", (req, res) => {
-  return res.json({
-    logged_in: fs.existsSync(COOKIES_PATH),
-    cookies_found: fs.existsSync(COOKIES_PATH) ? "✅ cookies.json found" : "❌ cookies.json missing",
-    next_step: fs.existsSync(COOKIES_PATH)
-      ? "Proceed to /fetch"
-      : "Run login-local.js locally and commit cookies.json"
+  res.json({
+    login: fs.existsSync(COOKIES_PATH) ? "🟢 cookies.json found" : "🔴 missing cookies.json",
+    next: fs.existsSync(COOKIES_PATH)
+      ? "Use /fetch?url=..."
+      : "Run login-local.js and upload cookies.json"
   });
 });
 
-// === DIAGNOSE CHROME + COOKIE STATUS ===
+// -----------------------------------------
+// DIAGNOSTICS - CHROME + COOKIES
+// -----------------------------------------
 app.get("/diagnose", async (req, res) => {
-  const report = {
-    chromiumPath: CHROME_PATH || "❌ No chrome path detected",
+  let status = {
+    chromiumPath: CHROME_PATH,
     cookies: fs.existsSync(COOKIES_PATH) ? "✅ Found" : "❌ Missing",
     launch: "⏳ Checking..."
   };
 
   try {
     const browser = await puppeteer.launch({
-  headless: "new",
-  executablePath: CHROME_PATH,
-  args: [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--single-process",
-    "--no-zygote"
-  ],
-});
-
+      headless: "new",
+      executablePath: CHROME_PATH,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+    });
     await browser.close();
-    report.launch = "🟢 Chromium launched successfully. Puppeteer OK!";
+
+    status.launch = "🟢 Chromium launched successfully!";
   } catch (err) {
-    report.launch = "🔴 Failed to launch: " + err.message;
+    status.launch = "🔴 Launch failed → " + err.message;
   }
 
-  return res.json(report);
+  res.json(status);
 });
 
-// === MAIN DOWNLOAD LOGIC ===
+// -----------------------------------------
+// MAIN DOWNLOAD FETCH
+// -----------------------------------------
 app.get("/fetch", async (req, res) => {
   let url = req.query.url;
-
   if (!url) return res.json({ error: "❌ Missing ?url=" });
 
-  // AUTO-FIX SHORT LINKS
+  // AUTO FIX LINK
   url = url
     .replace("teraboxurl.com", "1024terabox.com")
     .replace("terabox.com", "1024terabox.com");
 
-  // DOMAIN VALIDATION
-  if (!ALLOWED_DOMAINS.some(domain => url.includes(domain))) {
-    return res.json({
-      error: "❌ Unsupported domain",
-      allowed_domains: ALLOWED_DOMAINS
-    });
+  // DOMAIN CHECK
+  if (!ALLOWED_DOMAINS.some(d => url.includes(d))) {
+    return res.json({ error: "❌ Invalid domain", allowed: ALLOWED_DOMAINS });
   }
 
-  // COOKIES CHECK
+  // COOKIE CHECK
   if (!fs.existsSync(COOKIES_PATH)) {
     return res.json({
-      error: "❌ cookies.json missing",
-      solution: "Run login-local.js on your PC to generate it"
+      error: "❌ cookies.json not found",
+      fix: "Run login-local.js to generate it"
     });
   }
 
   let browser;
   try {
     browser = await puppeteer.launch({
-      headless: true,
+      headless: "new",
       executablePath: CHROME_PATH,
       args: [
         "--no-sandbox",
+        "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
-        "--disable-setuid-sandbox"
-      ],
+        "--single-process"
+      ]
     });
 
     const page = await browser.newPage();
-    const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, "utf8"));
+    const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH));
     await page.setCookie(...cookies);
 
+    // OPEN LINK
     await page.goto(url, { waitUntil: "networkidle0", timeout: 120000 });
 
-    // UPDATED SELECTORS FOR FILE INFO
+    // FILE NAME
     const fileName = await page.evaluate(() =>
       document.querySelector(".video-info-title,.filename,.usr-file-name")?.innerText
     );
 
+    // DOWNLOAD LINK
     const downloadUrl = await page.evaluate(() => {
-      const link = document.querySelector("a[href*='data.'], a[href*='download'], .btn-download");
-      return link ? link.href : null;
+      let btn =
+        document.querySelector("a[href*='download']") ||
+        document.querySelector("a[href*='data.']") ||
+        document.querySelector(".btn-download");
+      return btn?.href || null;
     });
 
     if (!downloadUrl) {
       return res.json({
-        error: "⛔ Download link not found - login expired",
-        solution: "Re-run login-local.js and upload new cookies.json"
+        error: "⛔ Download link not found (login expired)",
+        fix: "Run login-local.js again and update cookies.json"
       });
     }
 
@@ -152,17 +154,17 @@ app.get("/fetch", async (req, res) => {
       success: true,
       file: fileName || "Unknown File",
       download: downloadUrl,
-      message: "⚡ Copy the link & download directly!"
+      message: "⚡ Copy link & download"
     });
 
   } catch (err) {
-    return res.json({ error: "❌ Failed to fetch file", details: err.message });
+    return res.json({ error: "❌ Failed", details: err.message });
   } finally {
     if (browser) await browser.close();
   }
 });
 
-// === START SERVER ===
-app.listen(PORT, () => {
-  console.log(`🚀 TeraBox Backend Running on PORT ${PORT}`);
-});
+// -----------------------------------------
+app.listen(PORT, () =>
+  console.log(`🚀 Terabox backend running on PORT ${PORT}`)
+);
