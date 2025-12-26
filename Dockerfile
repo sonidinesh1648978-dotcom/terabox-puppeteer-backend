@@ -1,6 +1,6 @@
 FROM node:18-bullseye
 
-# Install Chromium
+# Install Chromium and required dependencies (minimal + stable)
 RUN apt-get update && apt-get install -y \
   chromium \
   chromium-driver \
@@ -18,18 +18,20 @@ RUN apt-get update && apt-get install -y \
   libxdamage1 \
   libxrandr2 \
   xdg-utils \
-  --no-install-recommends \
-  && rm -rf /var/lib/apt/lists/*
+  --no-install-recommends && \
+  rm -rf /var/lib/apt/lists/*
 
+# Tell Puppeteer to NOT download Chromium again
 ENV PUPPETEER_SKIP_DOWNLOAD=true
-ENV CHROME_PATH=/usr/bin/chromium
+
+# Correct chromium path for Puppeteer
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /app
-
-COPY package.json .
+COPY package.json ./
 RUN npm install
 
 COPY . .
 
 EXPOSE 10000
-CMD ["npm", "start"]
+CMD ["node", "server.js"]
