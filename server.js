@@ -8,34 +8,32 @@ const __dirname = path.resolve();
 const CHROME_PATH = "/usr/bin/chromium";
 const COOKIES_PATH = path.join(__dirname, "cookies.json");
 
-// ------------------ URL NORMALIZER (FIXED) ------------------
+// ------------------ URL NORMALIZER (FINAL FIX) ------------------
 function normalizeURL(url) {
   if (!url) return null;
   url = url.trim();
 
-  // Remove double protocol mistakes
+  // Remove double protocol
   url = url.replace(/https?:\/\/https?:\/\//gi, "https://");
 
-  // Remove "10241024" duplicate bug
-  url = url.replace(/1024https:\/\/1024/gi, "https://1024terabox.com");
+  // Remove repeated domain patterns
+  url = url.replace(/1024terabox\.com\/+1024terabox\.com/gi, "1024terabox.com");
 
-  // Add missing https
+  // Force https at start
   if (!url.startsWith("http")) url = "https://" + url;
 
-  // Convert known short domains -> once only
+  // Map all variations → main domain ONCE
   url = url
     .replace(/(https?:\/\/)?(www\.)?teraboxurl\.com/gi, "https://1024terabox.com")
     .replace(/(https?:\/\/)?(www\.)?terabox\.com/gi, "https://1024terabox.com");
 
-  // Ensure final cleaned correct format
-  if (!url.startsWith("https://1024terabox.com")) {
-    url = url.replace(/^https?:\/\/[^/]+/, "https://1024terabox.com");
-  }
+  // Clean double slashes
+  url = url.replace(/\/\/+/g, "/").replace("https:/", "https://");
 
   return url;
 }
 
-// ------------------ BROWSER LAUNCH (RENDER SAFE) ------------------
+// ------------------ LAUNCH BROWSER SAFE FOR RENDER ------------------
 async function launchBrowser() {
   return await puppeteer.launch({
     headless: "new",
@@ -48,15 +46,19 @@ async function launchBrowser() {
       "--disable-gpu",
       "--single-process",
       "--no-zygote",
-      "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
       "--ignore-certificate-errors",
+      "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
       "--window-size=1280,720",
-      `--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36`,
-    ],
+      "--disable-web-security",
+      "--disable-background-timer-throttling",
+      "--disable-renderer-backgrounding",
+      "--disable-extensions",
+      `--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36`
+    ]
   });
 }
 
-// ------------------ SAFE PAGE LOADING WITH RETRIES ------------------
+// ------------------ SAFE GOTO ------------------
 async function safeGoto(page, url) {
   const modes = ["networkidle2", "domcontentloaded", "load"];
   for (let m of modes) {
@@ -64,8 +66,8 @@ async function safeGoto(page, url) {
       console.log("⏳ Trying:", m);
       await page.goto(url, { waitUntil: m, timeout: 60000 });
       return true;
-    } catch (e) {
-      console.log("⚠️ Failed:", m);
+    } catch {
+      console.log("⚠️ Retry:", m);
     }
   }
   return false;
@@ -73,20 +75,20 @@ async function safeGoto(page, url) {
 
 // ------------------ DIAGNOSE ------------------
 app.get("/diagnose", async (req, res) => {
-  const cookies = fs.existsSync(COOKIES_PATH) ? "✅ Found" : "❌ Missing";
+  let cookies = fs.existsSync(COOKIES_PATH) ? "✅ Found" : "❌ Missing";
   try {
     const b = await launchBrowser();
     await b.close();
-    return res.json({ chromiumPath: CHROME_PATH, cookies, status: "🟢 Chromium OK" });
+    res.json({ chromium: "🟢 Browser OK", cookies });
   } catch (e) {
-    return res.json({ chromiumPath: CHROME_PATH, cookies, status: "❌ Browser failed", error: e.message });
+    res.json({ chromium: "❌ Failed", cookies, error: e.message });
   }
 });
 
-// ------------------ MAIN FETCH (NO CLICK, EXTRACT ONLY) ------------------
+// ------------------ MAIN FETCH ------------------
 app.get("/fetch", async (req, res) => {
   let url = req.query.url;
-  if (!url) return res.json({ error: "❌ Missing ?url parameter" });
+  if (!url) return res.json({ error: "❌ Missing ?url=" });
 
   url = normalizeURL(url);
   console.log("🌍 Final URL:", url);
@@ -94,49 +96,46 @@ app.get("/fetch", async (req, res) => {
   const browser = await launchBrowser();
   const page = await browser.newPage();
 
-  // load cookies if login exists
   if (fs.existsSync(COOKIES_PATH)) {
-    try {
-      const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, "utf8"));
-      await page.setCookie(...cookies);
-      console.log("🍪 Cookies applied.");
-    } catch {}
+    const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, "utf8"));
+    await page.setCookie(...cookies);
+    console.log("🍪 Cookies Applied");
   }
 
-  // load page
-  const open = await safeGoto(page, url);
-  if (!open) {
+  const opened = await safeGoto(page, url);
+  if (!opened) {
     await browser.close();
-    return res.json({ error: "❌ Navigation blocked or failed to load" });
+    return res.json({ error: "❌ Page blocked / cannot load" });
   }
 
-  await page.waitForTimeout(5000);
+  // Replace waitForTimeout with manual delay
+  await new Promise(r => setTimeout(r, 5000));
 
-  // extract direct file URL
-  const download = await page.evaluate(() => {
+  // -------- Extract URL only (NO CLICKING) --------
+  const directLink = await page.evaluate(() => {
     return [...document.querySelectorAll("a")]
       .map(a => a.href)
       .find(x => x.includes("data.") && x.includes("file/"));
   });
 
-  if (!download) {
+  if (!directLink) {
     await browser.close();
-    return res.json({ 
-      error: "❌ No direct URL found",
-      reason: "Probably cookie expired. Run login-local.js again."
+    return res.json({
+      error: "❌ No link found, login may have expired",
+      fix: "Run login-local.js again"
     });
   }
 
-  const title = await page.title();
-  await browser.close();
+  const title = (await page.title()).replace(/[^\w.-]/g, "_");
 
-  return res.json({
+  await browser.close();
+  res.json({
     success: true,
-    filename: title.replace(/[^\w.-]/g, "_") + ".mp4",
-    download
+    filename: title + ".mp4",
+    download: directLink
   });
 });
 
-// ------------------ START SERVER ------------------
+// ------------------ SERVER ------------------
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("🚀 RUNNING on port", PORT));
+app.listen(PORT, () => console.log(`🚀 Server Active on ${PORT}`));
