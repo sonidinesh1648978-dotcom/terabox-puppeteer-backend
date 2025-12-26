@@ -4,20 +4,33 @@ import path from "path";
 import fs from "fs";
 
 const app = express();
-app.use(express.json());
-
 const __dirname = path.resolve();
 const CHROME_PATH = "/usr/bin/chromium";
-const COOKIES_FILE = path.join(__dirname, "cookies.json");
+const COOKIES_PATH = path.join(__dirname, "cookies.json");
 
-// ---------- DOMAIN NORMALIZER ----------
-function normalize(url) {
-  return url
+// ----------------- URL FIXER -----------------
+function normalizeURL(url) {
+  if (!url) return null;
+  url = url.trim();
+
+  // remove accidental double domains: "https://1024https://1024..."
+  url = url.replace(/1024https?:\/\/1024/gi, "https://1024terabox.com");
+
+  // add missing protocol
+  if (!url.startsWith("http")) url = "https://" + url;
+
+  // convert short links → main domain ONCE
+  url = url
     .replace(/(https?:\/\/)?(www\.)?teraboxurl\.com/gi, "https://1024terabox.com")
     .replace(/(https?:\/\/)?(www\.)?terabox\.com/gi, "https://1024terabox.com");
+
+  // fix double https://
+  url = url.replace(/^https?:\/\/https?:\/\//, "https://");
+
+  return url;
 }
 
-// ---------- LAUNCH CHROMIUM (Render Safe Settings) ----------
+// ----------------- BROWSER LAUNCH (RENDER SAFE) -----------------
 async function launchBrowser() {
   return await puppeteer.launch({
     headless: "new",
@@ -28,120 +41,113 @@ async function launchBrowser() {
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
-      "--disable-extensions",
-      "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
       "--single-process",
       "--no-zygote",
+      "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
       "--ignore-certificate-errors",
-      "--disable-background-timer-throttling",
-      "--disable-renderer-backgrounding",
       "--window-size=1280,720",
       `--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36`,
-    ],
+    ]
   });
 }
 
-// ---------- SAFE GOTO WITH RETRIES ----------
+// ----------------- SAFE PAGE LOADING -----------------
 async function safeGoto(page, url) {
-  const tries = [
-    { waitUntil: "networkidle2", timeout: 60000 },
-    { waitUntil: "domcontentloaded", timeout: 60000 },
-    { waitUntil: "load", timeout: 60000 },
-  ];
-  for (let opt of tries) {
+  const modes = ["networkidle2", "domcontentloaded", "load"];
+  for (let mode of modes) {
     try {
-      await page.goto(url, opt);
+      console.log("⏳ Trying load:", mode);
+      await page.goto(url, { waitUntil: mode, timeout: 60000 });
       return true;
-    } catch {
-      console.log("⚠️ retry:", opt.waitUntil);
+    } catch (err) {
+      console.log("⚠️ retry:", mode);
     }
   }
   return false;
 }
 
-// ---------- DIAGNOSE ROUTE ----------
+// ----------------- DIAGNOSE -----------------
 app.get("/diagnose", async (req, res) => {
-  const cookiesOK = fs.existsSync(COOKIES_FILE) ? "✅ Found" : "❌ Missing";
-  let launch = "❌ Failed";
+  let result = {
+    chromiumPath: CHROME_PATH,
+    cookies: fs.existsSync(COOKIES_PATH) ? "✅ Found" : "❌ Missing",
+  };
   try {
     const b = await launchBrowser();
     await b.close();
-    launch = "🟢 Chromium launched successfully!";
+    result.launch = "🟢 OK - Chromium launched";
   } catch (e) {
-    launch = `❌ Launch failed: ${e.message}`;
+    result.launch = "❌ Failed to launch: " + e.message;
   }
-
-  res.json({
-    chromiumPath: CHROME_PATH,
-    cookies: cookiesOK,
-    launch,
-  });
+  res.json(result);
 });
 
-// ---------- MAIN FETCH ROUTE ----------
+// ----------------- MAIN API (NO CLICK, JUST EXTRACT LINK) -----------------
 app.get("/fetch", async (req, res) => {
   let url = req.query.url;
-  if (!url) return res.json({ error: "❌ Provide ?url=" });
+  if (!url) return res.json({ error: "❌ Missing ?url=" });
 
-  url = normalize(url);
-  console.log("🌐 Normalized:", url);
+  url = normalizeURL(url);
+  if (!url.includes("1024terabox")) {
+    return res.json({ error: "❌ Invalid link", fixed: normalizeURL(url) });
+  }
+
+  console.log("🌎 Final URL:", url);
 
   const browser = await launchBrowser();
   let page = await browser.newPage();
 
-  // Load cookies if present
-  if (fs.existsSync(COOKIES_FILE)) {
-    const cookies = JSON.parse(fs.readFileSync(COOKIES_FILE, "utf8"));
-    await page.setCookie(...cookies);
-    console.log("🍪 Cookies Loaded");
+  // apply cookies if login is available
+  if (fs.existsSync(COOKIES_PATH)) {
+    try {
+      const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, "utf8"));
+      await page.setCookie(...cookies);
+      console.log("🍪 Cookies Applied");
+    } catch (e) {
+      console.log("❌ Bad cookie file");
+    }
   }
 
-  // Anti-crash handlers
-  page.on("error", () => {});
-  page.on("pageerror", () => {});
+  // prevent crash if target closes
   page.on("close", async () => {
-    console.log("⚠️ Page closed, creating new tab...");
+    console.log("⚠️ Page closed - reopening");
     page = await browser.newPage();
     await safeGoto(page, url);
   });
 
-  // Try to open the link
-  const ok = await safeGoto(page, url);
-  if (!ok) {
+  const opened = await safeGoto(page, url);
+  if (!opened) {
     await browser.close();
-    return res.json({ error: "❌ Failed", details: "Navigation blocked or dropped" });
+    return res.json({ error: "❌ Page blocked or not reachable" });
   }
 
-  // Cloudflare wait & blank page recovery
-  await page.waitForTimeout(7000);
-  const html = await page.content();
-  if (html.length < 2500) {
-    console.log("⚠️ blank page → retry load");
-    await page.reload({ waitUntil: "networkidle2", timeout: 60000 });
-    await page.waitForTimeout(5000);
-  }
+  await page.waitForTimeout(5000); // anti-bot wait
 
-  // Extract download link
-  let download = await page.evaluate(() => {
-    const anchors = [...document.querySelectorAll("a")];
-    return anchors.map(a => a.href).find(h => h.includes("data.") && h.includes("file/"));
+  // ----------------- Extract WITHOUT clicking -----------------
+  const downloadLink = await page.evaluate(() => {
+    return [...document.querySelectorAll("a")]
+      .map(a => a.href)
+      .find(h => h.includes("data.") && h.includes("file/"));
   });
 
-  if (!download) {
+  if (!downloadLink) {
     await browser.close();
-    return res.json({ error: "❌ No direct link found", hint: "Login expired or blocked page" });
+    return res.json({
+      error: "❌ No direct link found (Login may be required)",
+      note: "Run login-local.js again"
+    });
   }
 
   const title = await page.title();
   await browser.close();
 
-  return res.json({
+  res.json({
     success: true,
-    name: title.replace(/[^\w.-]/g, "_") + ".mp4",
-    download
+    filename: title.replace(/[^\w.-]/g, "_") + ".mp4",
+    download: downloadLink
   });
 });
 
-// ---------- START SERVER ----------
+// ----------------- START SERVER -----------------
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 LIVE on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server Live on ${PORT}`));
