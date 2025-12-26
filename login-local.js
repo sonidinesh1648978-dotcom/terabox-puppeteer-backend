@@ -1,43 +1,39 @@
 import puppeteer from "puppeteer";
-import fs from "fs";
+
+const COOKIES_FILE = "./cookies.json";
 
 (async () => {
   const browser = await puppeteer.launch({
     headless: false,
     executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
     args: [
-      "--window-size=1200,800",
+      "--no-sandbox",
       "--disable-web-security",
-      "--disable-blink-features=AutomationControlled"
+      "--disable-gpu",
+      "--start-maximized"
     ]
   });
 
   const page = await browser.newPage();
-  await page.goto("https://www.1024terabox.com/", {
+
+  await page.goto("https://1024terabox.com", {
     waitUntil: "networkidle2",
     timeout: 0
   });
 
-  console.log("👉 Please login manually. DO NOT CLOSE THE BROWSER YOURSELF.");
-  console.log("⏳ Waiting for login to complete...");
+  console.log("⚠️ Login manually now...");
+  console.log("👉 AFTER LOGIN, DO NOT CLOSE BROWSER YOURSELF. WAIT.");
+  console.log("⏳ Saving cookies automatically in 30 sec...");
 
-  // Wait until the URL confirms user is logged in
-  try {
-    await page.waitForFunction(
-      () => window.location.href.includes("main") || document.cookie.includes("BDUSS"),
-      { timeout: 0 }
-    );
-  } catch (e) {
-    console.log("⚠️ Login detection timeout, BUT we will still try to save cookies...");
-  }
+  // Wait for you to log in
+  await page.waitForTimeout(30000);
 
-  // Save cookies anyway
+  // Save cookies
   const cookies = await page.cookies();
-  fs.writeFileSync("cookies.json", JSON.stringify(cookies, null, 2));
-
-  console.log("🎉 cookies.json saved successfully!");
-  console.log("📁 Check the file in your folder.");
-
-  // Close browser from script
+  import('fs').then(fs => fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2)));
+  
+  console.log("✅ cookies.json saved successfully!");
+  console.log("📁 Upload this file to Render or commit it to GitHub.");
+  
   await browser.close();
 })();
