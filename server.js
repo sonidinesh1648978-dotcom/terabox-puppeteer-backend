@@ -10,16 +10,12 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 const __dirname = path.resolve();
-
 const COOKIES_PATH = path.join(__dirname, "cookies.json");
 
-// Detect Chromium on Render
-const CHROME_PATH =
-  process.env.PUPPETEER_EXECUTABLE_PATH ||
-  "/usr/bin/chromium" ||
-  "/usr/bin/chromium-browser";
+// Detect Chromium Path for Render
+const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium";
 
-// ---------- DOMAIN NORMALIZER ----------
+// -------- DOMAIN NORMALIZER --------
 function normalizeTerabox(url) {
   if (!url) return null;
   return url
@@ -27,10 +23,10 @@ function normalizeTerabox(url) {
     .replace(/https?:\/\/(www\.)?terabox\.com/i, "https://1024terabox.com");
 }
 
-// ---------- DIAGNOSTICS ----------
+// -------- DIAGNOSTICS --------
 app.get("/diagnose", async (req, res) => {
   try {
-    let browser = null;
+    let browser;
     try {
       browser = await puppeteer.launch({
         headless: "new",
@@ -38,40 +34,42 @@ app.get("/diagnose", async (req, res) => {
         args: ["--no-sandbox", "--disable-setuid-sandbox"]
       });
       await browser.close();
-      return res.json({
+      res.json({
         chromiumPath: CHROME_PATH,
-        cookies: fs.existsSync(COOKIES_PATH) ? "Found" : "Missing",
+        cookies: fs.existsSync(COOKIES_PATH) ? "🟢 Found" : "❌ Missing",
         launch: "🟢 Chromium launched successfully!"
       });
     } catch (e) {
-      return res.json({
+      res.json({
         chromiumPath: CHROME_PATH,
-        cookies: fs.existsSync(COOKIES_PATH) ? "Found" : "Missing",
-        launch: "❌ Launch failed: " + e.message
+        cookies: fs.existsSync(COOKIES_PATH) ? "🟢 Found" : "❌ Missing",
+        launch: "🔴 Launch failed",
+        error: e.message
       });
     }
   } catch (err) {
-    res.json({ error: "Unexpected", details: err.toString() });
+    res.json({ error: "Unexpected error", details: err.toString() });
   }
 });
 
-// ---------- MAIN API ----------
+// -------- MAIN API /fetch --------
 app.get("/fetch", async (req, res) => {
   let { url } = req.query;
 
   if (!url) {
     return res.status(400).json({
       error: "❌ Provide ?url=",
-      example:
-        "/fetch?url=https://teraboxurl.com/s/xxxxxxx"
+      example: "/fetch?url=https://teraboxurl.com/s/xxxxxxx"
     });
   }
 
-  url = normalizeTerabox(url); // fix domain
-  console.log("➡ Normalized URL:", url);
+  // Normalize domain
+  url = normalizeTerabox(url);
+  console.log("🌐 Normalized:", url);
 
-  let browser;
+  let browser, page;
   try {
+    // ---- LAUNCH BROWSER SAFE CONFIG ----
     browser = await puppeteer.launch({
       headless: "new",
       executablePath: CHROME_PATH,
@@ -80,17 +78,31 @@ app.get("/fetch", async (req, res) => {
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
+        "--disable-extensions",
         "--disable-gpu",
+        "--disable-web-security",
+        "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
         "--single-process",
         "--no-zygote",
+        "--ignore-certificate-errors",
+        "--ignore-certificate-errors-spki-list",
         "--window-size=1280,720",
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "--start-maximized",
+        `--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`
       ]
     });
 
-    const page = await browser.newPage();
+    page = await browser.newPage();
 
-    // Anti-bot bypass
+    // ---- SAFETY: prevent auto-close crashes ----
+    page.on("error", () => {});
+    page.on("pageerror", () => {});
+    page.on("close", () => console.log("⚠️ Page was closed, recovering..."));
+
+    // ---- ANTI-BOT SHIELD ----
     await page.setExtraHTTPHeaders({
       "Accept-Language": "en-US,en;q=0.9",
       "Referer": "https://1024terabox.com/",
@@ -101,48 +113,49 @@ app.get("/fetch", async (req, res) => {
       Object.defineProperty(navigator, "platform", { get: () => "Win32" });
     });
 
-    // Load saved login cookies
+    // ---- LOAD LOGIN COOKIES ----
     if (fs.existsSync(COOKIES_PATH)) {
       const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH));
       await page.setCookie(...cookies);
+      console.log("🍪 Cookies Loaded");
+    } else {
+      console.log("⚠️ No cookies found! Some links may fail.");
     }
 
-    // FIRST TRY
+    // ---- NAVIGATION + FALLBACK ----
     try {
-      await page.goto(url, {
-        waitUntil: "networkidle2",
-        timeout: 120000
-      });
-    } catch (_) {
-      // FALLBACK TRY
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: 120000
-      });
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
+    } catch {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 120000 });
     }
 
-    // HANDLE EMPTY PAGE
+    // Empty response fix
     if ((await page.content()).length < 3000) {
       await page.reload({ waitUntil: "networkidle2" });
     }
 
-    // WAIT FOR POSSIBLE BUTTON
+    // Page may close → reopen new tab
+    if (page.isClosed()) {
+      page = await browser.newPage();
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+    }
+
+    // ---- WAIT & SCAN FOR LINK ----
     await page.waitForTimeout(5000);
 
-    // EXTRACT DOWNLOAD LINK
     const downloadUrl = await page.evaluate(() => {
-      const btn =
+      const link =
         document.querySelector("a[href*='data.terabox']") ||
         document.querySelector("a[href*='download']") ||
         document.querySelector("a[href*='file']");
-      return btn ? btn.href : null;
+      return link ? link.href : null;
     });
 
     if (!downloadUrl) {
       await browser.close();
       return res.status(404).json({
         error: "❌ Download link not found",
-        hint: "Maybe cookies expired? Re-login with login-local.js"
+        reason: "Maybe cookies expired or anti-bot triggered."
       });
     }
 
@@ -164,6 +177,4 @@ app.get("/fetch", async (req, res) => {
   }
 });
 
-app.listen(PORT, () =>
-  console.log(`🚀 Server LIVE on port ${PORT}`)
-);
+app.listen(PORT, () => console.log(`🚀 LIVE on port ${PORT}`));
