@@ -12,7 +12,12 @@ app.use(cors());
 
 // === CONFIG FOR RENDER ===
 const PORT = process.env.PORT || 10000;
-const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser";
+// --- AUTO DETECT CHROMIUM PATH ---
+const CHROME_PATH =
+  process.env.PUPPETEER_EXECUTABLE_PATH ||
+  "/opt/render/project/.cache/puppeteer/chrome/linux-*/chrome" || // often here
+  "/opt/render/.cache/puppeteer/chrome/linux-*/chrome" ||         // fallback
+  null;
 const COOKIES_PATH = path.join(__dirname, "cookies.json");
 
 // === ACCEPTED DOMAINS ===
@@ -52,22 +57,24 @@ app.get("/check-login", (req, res) => {
 // === DIAGNOSE CHROME + COOKIE STATUS ===
 app.get("/diagnose", async (req, res) => {
   const report = {
-    chromiumPath: CHROME_PATH,
+    chromiumPath: CHROME_PATH || "❌ No chrome path detected",
     cookies: fs.existsSync(COOKIES_PATH) ? "✅ Found" : "❌ Missing",
     launch: "⏳ Checking..."
   };
 
   try {
     const browser = await puppeteer.launch({
-      headless: true,
-      executablePath: CHROME_PATH,
-      args: [
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-setuid-sandbox"
-      ],
-    });
+  headless: "new",
+  executablePath: CHROME_PATH,
+  args: [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--single-process",
+    "--no-zygote"
+  ],
+});
 
     await browser.close();
     report.launch = "🟢 Chromium launched successfully. Puppeteer OK!";
