@@ -11,6 +11,29 @@ const PORT = process.env.PORT || 10000;
 const CHROME_PATH = "/usr/bin/chromium";
 const COOKIES_FILE = "cookies.json";
 
+// ------------------ DIAGNOSE ENDPOINT ------------------
+app.get("/diagnose", async (req, res) => {
+  const output = {
+    chromiumPath: CHROME_PATH,
+    cookies: fs.existsSync(COOKIES_FILE) ? "🍪 Found" : "❌ Missing cookies.json",
+    stealth: puppeteer ? "🟢 Stealth Loaded" : "❌ Stealth NOT Loaded"
+  };
+
+  try {
+    const browser = await puppeteer.launch({
+      headless: "new",
+      executablePath: CHROME_PATH,
+      args: ["--no-sandbox", "--disable-dev-shm-usage"]
+    });
+    await browser.close();
+    output.launch = "🟢 Chromium launched OK";
+  } catch (e) {
+    output.launch = `❌ Failed to launch: ${e.message}`;
+  }
+
+  return res.json(output);
+});
+
 // ------------------ URL FIXER ------------------
 function normalizeURL(url) {
   if (!url) return null;
