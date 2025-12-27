@@ -1,141 +1,135 @@
 import express from "express";
-import puppeteer from "puppeteer-core";
-import path from "path";
 import fs from "fs";
+import path from "path";
+import puppeteer from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 
+puppeteer.use(StealthPlugin());
 const app = express();
-const __dirname = path.resolve();
-const CHROME_PATH = "/usr/bin/chromium";
-const COOKIES_PATH = path.join(__dirname, "cookies.json");
+const PORT = process.env.PORT || 10000;
 
-// ------------------ URL NORMALIZER (FINAL FIX) ------------------
+const CHROME_PATH = "/usr/bin/chromium";
+const COOKIES_FILE = "cookies.json";
+
+// ------------------ URL FIXER ------------------
 function normalizeURL(url) {
   if (!url) return null;
   url = url.trim();
 
-  // Remove double protocol
+  // Remove duplicated protocols
   url = url.replace(/https?:\/\/https?:\/\//gi, "https://");
 
-  // Remove repeated domain patterns
-  url = url.replace(/1024terabox\.com\/+1024terabox\.com/gi, "1024terabox.com");
+  // Remove double 1024 prefixes
+  url = url.replace(/1024https?:\/\//gi, "https://");
 
-  // Force https at start
-  if (!url.startsWith("http")) url = "https://" + url;
+  // Remove accidental double domain
+  url = url.replace(/https:\/\/1024terabox\.com\/1024terabox\.com/gi, "https://1024terabox.com");
 
-  // Map all variations → main domain ONCE
-  url = url
-    .replace(/(https?:\/\/)?(www\.)?teraboxurl\.com/gi, "https://1024terabox.com")
-    .replace(/(https?:\/\/)?(www\.)?terabox\.com/gi, "https://1024terabox.com");
+  // Convert any terabox link to 1024 format
+  url = url.replace(/https?:\/\/(www\.)?(terabox|teraboxurl)\.com/gi, "https://1024terabox.com");
 
-  // Clean double slashes
-  url = url.replace(/\/\/+/g, "/").replace("https:/", "https://");
+  // Make sure only one prefix exists
+  if (!url.startsWith("https://1024terabox.com")) {
+    url = `https://1024terabox.com${url.replace(/.*1024terabox\.com/, "")}`;
+  }
 
   return url;
 }
 
-// ------------------ LAUNCH BROWSER SAFE FOR RENDER ------------------
+// ------------------ BROWSER LAUNCH ------------------
 async function launchBrowser() {
   return await puppeteer.launch({
     headless: "new",
     executablePath: CHROME_PATH,
-    ignoreHTTPSErrors: true,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--single-process",
-      "--no-zygote",
-      "--ignore-certificate-errors",
-      "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
-      "--window-size=1280,720",
       "--disable-web-security",
-      "--disable-background-timer-throttling",
-      "--disable-renderer-backgrounding",
+      "--single-process",
+      "--disable-gpu",
       "--disable-extensions",
-      `--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36`
-    ]
+      "--disable-blink-features=AutomationControlled",
+      "--window-size=1280,720",
+      "--ignore-certificate-errors",
+      `--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`,
+    ],
   });
 }
 
 // ------------------ SAFE GOTO ------------------
 async function safeGoto(page, url) {
-  const modes = ["networkidle2", "domcontentloaded", "load"];
-  for (let m of modes) {
+  const tries = ["networkidle2", "domcontentloaded", "load"];
+  for (const cond of tries) {
     try {
-      console.log("⏳ Trying:", m);
-      await page.goto(url, { waitUntil: m, timeout: 60000 });
+      await page.goto(url, { waitUntil: cond, timeout: 15000 });
       return true;
     } catch {
-      console.log("⚠️ Retry:", m);
+      console.log(`⚠️ Retry: ${cond}`);
     }
   }
   return false;
 }
 
-// ------------------ DIAGNOSE ------------------
-app.get("/diagnose", async (req, res) => {
-  let cookies = fs.existsSync(COOKIES_PATH) ? "✅ Found" : "❌ Missing";
-  try {
-    const b = await launchBrowser();
-    await b.close();
-    res.json({ chromium: "🟢 Browser OK", cookies });
-  } catch (e) {
-    res.json({ chromium: "❌ Failed", cookies, error: e.message });
-  }
-});
+// ------------------ MAIN ROUTE ------------------
+app.get("/api", async (req, res) => {
+  let url = normalizeURL(req.query.url);
+  if (!url) return res.json({ error: "❌ Provide link: ?url=" });
 
-// ------------------ MAIN FETCH ------------------
-app.get("/fetch", async (req, res) => {
-  let url = req.query.url;
-  if (!url) return res.json({ error: "❌ Missing ?url=" });
-
-  url = normalizeURL(url);
   console.log("🌍 Final URL:", url);
 
-  const browser = await launchBrowser();
-  const page = await browser.newPage();
-
-  if (fs.existsSync(COOKIES_PATH)) {
-    const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, "utf8"));
-    await page.setCookie(...cookies);
+  // Load cookies if available
+  let cookies = [];
+  if (fs.existsSync(COOKIES_FILE)) {
+    cookies = JSON.parse(fs.readFileSync(COOKIES_FILE));
     console.log("🍪 Cookies Applied");
   }
 
-  const opened = await safeGoto(page, url);
-  if (!opened) {
-    await browser.close();
-    return res.json({ error: "❌ Page blocked / cannot load" });
-  }
+  let browser;
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage();
 
-  // Replace waitForTimeout with manual delay
-  await new Promise(r => setTimeout(r, 5000));
+    // Apply cookies
+    if (cookies.length) await page.setCookie(...cookies);
 
-  // -------- Extract URL only (NO CLICKING) --------
-  const directLink = await page.evaluate(() => {
-    return [...document.querySelectorAll("a")]
-      .map(a => a.href)
-      .find(x => x.includes("data.") && x.includes("file/"));
-  });
-
-  if (!directLink) {
-    await browser.close();
-    return res.json({
-      error: "❌ No link found, login may have expired",
-      fix: "Run login-local.js again"
+    // Extra headers to avoid blocks
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "en-US,en;q=0.9",
+      "Referer": "https://1024terabox.com/",
+      "DNT": "1"
     });
+    
+    await page.setExtraHTTPHeaders({
+    "referer": "https://1024terabox.com/",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "accept-language": "en-US,en;q=0.9"
+    });
+
+    // Navigate
+    const ok = await safeGoto(page, url);
+    if (!ok) throw new Error("Blocked or page not loaded");
+
+    // Wait a bit (replacement for waitForTimeout)
+    await new Promise(res => setTimeout(res, 5000));
+
+    // Try to extract any visible link
+    const link = await page.evaluate(() => {
+      const a = document.querySelector("a[href*='download']");
+      return a ? a.href : null;
+    });
+
+    if (!link) return res.json({ error: "❌ No direct download link found" });
+
+    return res.json({ status: "🟢 Success", link });
+
+  } catch (err) {
+    console.log("❌ ERROR:", err.message);
+    return res.json({ error: "❌ Failed", details: err.message });
+  } finally {
+    if (browser) await browser.close();
   }
-
-  const title = (await page.title()).replace(/[^\w.-]/g, "_");
-
-  await browser.close();
-  res.json({
-    success: true,
-    filename: title + ".mp4",
-    download: directLink
-  });
 });
 
-// ------------------ SERVER ------------------
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Server Active on ${PORT}`));
+// ------------------ START ------------------
+app.listen(PORT, () => console.log(`🚀 RUNNING ON PORT ${PORT}`));
