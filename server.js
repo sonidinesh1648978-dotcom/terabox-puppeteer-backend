@@ -1,153 +1,97 @@
-// ===================== IMPORTS =====================
 import express from "express";
+import fetch from "node-fetch";
 import fs from "fs";
-import path from "path";
-import puppeteer from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
 
-puppeteer.use(StealthPlugin());
-
-// ===================== CONFIG =====================
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-const CHROME_PATH = "/usr/bin/chromium";
-const COOKIES_FILE = "cookies.json";
+// Load saved login cookies (generated from login-local.js)
+const COOKIES = fs.existsSync("cookies.json") ? JSON.parse(fs.readFileSync("cookies.json")) : [];
+const LOGIN_COOKIE = COOKIES.map(c => `${c.name}=${c.value}`).join("; ");
 
-// ===================== URL NORMALIZER =====================
-function normalizeURL(url) {
+function normalize(url) {
   if (!url) return null;
   url = url.trim();
 
-  // Remove duplicate http(s)
-  url = url.replace(/https?:\/\/https?:\/\//gi, "https://");
-
-  // Remove 1024https or double 1024 prefixes
-  url = url.replace(/1024https?:\/\//gi, "https://");
-
-  // Fix double domain issues
-  url = url.replace(/https:\/\/1024terabox\.com\/1024terabox\.com/gi, "https://1024terabox.com");
-
-  // Convert terabox mirrors to 1024 domain
-  url = url.replace(/https?:\/\/(www\.)?(terabox|teraboxurl|teraboxapp)\.com/gi, "https://1024terabox.com");
-
-  // Always ensure correct prefix
-  if (!url.startsWith("https://1024terabox.com")) {
-    url = "https://1024terabox.com" + url.replace(/.*1024terabox\.com/, "");
-  }
-
-  return url;
+  // extract share ID from any terabox mirror
+  const match = url.match(/\/s\/([A-Za-z0-9\-_]+)/);
+  return match ? match[1] : null;
 }
 
-// ===================== LAUNCH CHROMIUM =====================
-async function launchBrowser() {
-  return await puppeteer.launch({
-    headless: "new",
-    executablePath: CHROME_PATH,
-    args: [
-      "--no-sandbox",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-      "--disable-blink-features=AutomationControlled",
-      "--disable-setuid-sandbox",
-      "--disable-web-security",
-      "--single-process",
-      "--ignore-certificate-errors",
-      "--window-size=1366,768",
-      `--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36`,
-    ],
-  });
-}
+async function getTeraboxMeta(surl) {
+  const metaURL = `https://dm.1024tera.com/sharing/link?surl=${surl}&clearCache=1`;
 
-// ===================== SAFE NAVIGATION =====================
-async function safeGoto(page, url) {
-  const strategies = ["domcontentloaded", "networkidle0", "load"];
-  for (const mode of strategies) {
-    try {
-      await page.goto(url, { waitUntil: mode, timeout: 20000 });
-      return true;
-    } catch {
-      console.log(`⚠️ Retry: ${mode}`);
+  const response = await fetch(metaURL, {
+    headers: {
+      "cookie": LOGIN_COOKIE,
+      "user-agent": "Mozilla/5.0",
+      "referer": "https://1024terabox.com/"
     }
-  }
-  return false;
+  });
+
+  const text = await response.text();
+
+  // Extract internal JSON (this is how teradownloader does it)
+  const jsonMatch = text.match(/window\.preloadData\s?=\s?({.*});/);
+  if (!jsonMatch) throw new Error("No internal metadata detected");
+
+  const json = JSON.parse(jsonMatch[1]);
+  return json;
 }
 
-// ===================== MAIN API ROUTE =====================
+async function getDirectLink(surl) {
+  const url = `https://dm.1024tera.com/sharing/link?surl=${surl}&clearCache=1`;
+  const r = await fetch(url, {
+    headers: {
+      "cookie": LOGIN_COOKIE,
+      "user-agent": "Mozilla/5.0",
+      "referer": "https://1024terabox.com/"
+    }
+  });
+  const text = await r.text();
+
+  const dlMatch = text.match(/https:\/\/data\.terabox\.app\/file[^"]+/);
+  return dlMatch ? dlMatch[0] : null;
+}
+
+// ---------------- API ENDPOINT ----------------
 app.get("/api", async (req, res) => {
-  let url = normalizeURL(req.query.url);
-  if (!url) return res.json({ error: "❌ No link provided, use: ?url=" });
+  const input = req.query.url;
+  const surl = normalize(input);
 
-  console.log("🌍 Final URL:", url);
+  if (!surl) return res.json({ error: "❌ Invalid Terabox share link" });
 
-  // Load Cookies
-  let cookies = [];
-  if (fs.existsSync(COOKIES_FILE)) {
-    cookies = JSON.parse(fs.readFileSync(COOKIES_FILE));
-    console.log("🍪 Cookies Loaded");
-  }
-
-  let browser;
   try {
-    browser = await launchBrowser();
-    const page = await browser.newPage();
+    // 1. fetch metadata
+    const data = await getTeraboxMeta(surl);
 
-    // Apply cookies if exist
-    if (cookies.length) await page.setCookie(...cookies);
+    const file = data.file_list.file_list[0];
+    const name = file.server_filename;
+    const size = file.size;
+    const fs_id = file.fs_id;
 
-    // Headers to reduce blocking
-    await page.setExtraHTTPHeaders({
-      "Referer": "https://1024terabox.com/",
-      "Accept-Language": "en-US,en;q=0.9",
-      "DNT": "1"
-    });
+    // 2. direct link generation
+    const direct = await getDirectLink(surl);
+    if (!direct) return res.json({ error: "⚠️ No direct link generated. Cookies may be expired." });
 
-    // Try loading
-    const ok = await safeGoto(page, url);
-    if (!ok) throw new Error("Page blocked or failed to load");
+    // 3. streaming URL (video player link)
+    const stream = `https://v.1024terabox.com/play/${fs_id}`;
 
-    // Remove login popups / overlays
-    await new Promise(r => setTimeout(r, 3000));
-    await page.evaluate(() => {
-      [
-        "div.login-dialog",
-        "iframe[src*='google']",
-        ".modal-dialog",
-        "#ncPopups",
-      ].forEach(sel => document.querySelector(sel)?.remove());
-    });
-
-    // Extract download link
-    const link = await page.evaluate(() => {
-      const selectors = [
-        "a[href*='download']",
-        "a[href*='.mp4']",
-        "video source[src]",
-        "a[class*='dl']",
-      ];
-      for (let s of selectors) {
-        const el = document.querySelector(s);
-        if (el) return el.href || el.src;
-      }
-      return null;
-    });
-
-    if (!link) return res.json({ error: "❌ Download link hidden / login needed" });
-
-    return res.json({
-      status: "🟢 OK",
-      original: url,
-      directLink: link
+    // 4. Final output
+    res.json({
+      status: "🟢 SUCCESS",
+      surl,
+      name,
+      size,
+      streaming: stream,
+      direct_download: direct,
+      raw_api_used: "dm.1024tera.com + data.terabox.app"
     });
 
   } catch (e) {
-    console.log("❌ ERROR:", e.message);
-    return res.json({ error: "❌ Failed", details: e.message });
-
-  } finally {
-    if (browser) await browser.close();
+    res.json({ error: "❌ Failed", reason: e.message });
   }
 });
 
-// ===================== START SERVER =====================
-app.listen(PORT, () => console.log(`🚀 RUNNING ON PORT ${PORT}`));
+// ---------------- START SERVER ----------------
+app.listen(PORT, () => console.log("🚀 READY: http://localhost:" + PORT));
