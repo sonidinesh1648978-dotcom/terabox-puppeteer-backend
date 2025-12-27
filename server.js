@@ -29,8 +29,11 @@ function normalize(input) {
 
 // Convert share link → DM redirect link
 function convertToDM(url) {
-  const surl = url.split("/s/")[1]?.split("?")[0];
-  return `https://dm.1024tera.com/sharing/link?surl=${surl}&clearCache=1`;
+  const token = url.split("/s/")[1]?.split("?")[0];
+  if (/^1b_/i.test(token)) {
+    token = token.substring(1);
+  }
+  return `https://dm.1024tera.com/sharing/link?surl=${token}&clearCache=1`;
 }
 
 // Launch Stealth Chromium
