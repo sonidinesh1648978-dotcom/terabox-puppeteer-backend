@@ -31,7 +31,7 @@ function normalize(input) {
 function convertToDM(url) {
   let token = url.split("/s/")[1]?.split("?")[0];
   if (/^1b_/i.test(token)) {
-    token = token.substring(1);
+    token = token.slice(1);
   }
  return `https://dm.1024tera.com/sharing/link?surl=${token}&clearCache=1`;
 }
