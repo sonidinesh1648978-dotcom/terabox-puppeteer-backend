@@ -1,182 +1,125 @@
 import express from "express";
 import fs from "fs";
-import puppeteer from "puppeteer-core";
 import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import puppeteer from "puppeteer-core";
+import Stealth from "puppeteer-extra-plugin-stealth";
+import puppeteerExtra from "puppeteer-extra";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-const COOKIES_FILE = path.join(__dirname, "cookies.json");
-const CHROME_PATH = "/usr/bin/chromium"; // Render chromium path
+const CHROME_PATH = "/usr/bin/chromium";
+const COOKIE_FILE = "cookies.json";
 
-//-----------------------------------
-// URL FIX LOGIC
-//-----------------------------------
-function convertToDM(url) {
-  if (!url || !url.includes("/s/")) return null;
-  let token = url.split("/s/")[1].split("?")[0];
+puppeteerExtra.use(Stealth());
 
-  // Fix "1b_" issue
-  if (token.startsWith("1b_")) token = token.substring(1);
+// Normalize and convert TeraBox link → DM link
+function convert(url) {
+  if (!url) return null;
 
-  return `https://dm.1024tera.com/sharing/link?surl=${token}&clearCache=1`;
+  url = url.trim()
+           .replace(/https?:\/\/https?:\/\//g, "https://")
+           .replace(/1024https?:\/\//g, "https://")
+           .replace(/teraboxurl\.com|terabox\.com/gi, "1024terabox.com");
+
+  const token = url.split("/s/")[1]?.split("?")[0];
+  if (!token) return null;
+  const clean = token.startsWith("1") ? token.slice(1) : token;
+
+  return `https://dm.1024tera.com/sharing/link?surl=${clean}&clearCache=1`;
 }
 
-//-----------------------------------
-// PUPPETEER BOOT
-//-----------------------------------
-async function launchBrowser() {
-  return await puppeteer.launch({
+// Launch with stealth
+async function launch() {
+  return puppeteerExtra.launch({
     headless: "new",
     executablePath: CHROME_PATH,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
-      "--disable-web-security",
-      "--disable-blink-features=AutomationControlled",
-      "--window-size=1366,768",
-    ],
-    ignoreDefaultArgs: ["--enable-automation"],
+      "--window-size=1280,720",
+      "--single-process"
+    ]
   });
 }
 
-//-----------------------------------
-// LOAD WITH CLOUDFLARE RETRIES
-//-----------------------------------
-async function safeLoad(page, url) {
-  const modes = ["networkidle2", "domcontentloaded", "load"];
-  for (let m of modes) {
-    try {
-      console.log("⏳ Loading (mode):", m);
-      await page.goto(url, { waitUntil: m, timeout: 60000 });
-      return true;
-    } catch {
-      console.log("⚠️ Retry:", m);
-    }
-  }
-  return false;
-}
-
-//-----------------------------------
 // MAIN API
-//-----------------------------------
 app.get("/api", async (req, res) => {
-  const input = req.query.url;
-  const dmUrl = convertToDM(input);
+  const raw = req.query.url;
+  const target = convert(raw);
+  if (!target) return res.json({ error: "❌ Invalid link format" });
 
-  if (!dmUrl) return res.json({ error: "❌ Invalid or missing link" });
-  console.log("➡ Visiting:", dmUrl);
+  console.log("➡ Visiting:", target);
 
   let cookies = [];
-  if (fs.existsSync(COOKIES_FILE)) {
-    cookies = JSON.parse(fs.readFileSync(COOKIES_FILE));
-    console.log("🍪 Cookies Applied");
+  if (fs.existsSync(COOKIE_FILE)) {
+    cookies = JSON.parse(fs.readFileSync(COOKIE_FILE, "utf8"));
+    console.log("🍪 Cookies Loaded");
   }
 
   let browser;
+  let finalLink = null;
+
   try {
-    browser = await launchBrowser();
+    browser = await launch();
     const page = await browser.newPage();
 
     if (cookies.length) await page.setCookie(...cookies);
 
-    // Anti-block headers
-    await page.setExtraHTTPHeaders({
-      "Accept-Language": "en-US,en;q=0.9",
-      "Referer": "https://1024terabox.com/",
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-    });
-
-    // Navigate
-    const loaded = await safeLoad(page, dmUrl);
-    if (!loaded) throw new Error("Blocked or failed to load (Cloudflare/Timeout)");
-
-    //--------------------------------------------------
-    // CHECK IF LOGIN POPUP EXISTS
-    //--------------------------------------------------
-    const needLogin = await page.$("button[class*='login'], .login-btn, .sign-in");
-    if (needLogin) {
-      return res.json({
-        error: "🔐 Login required",
-        message: "Login cookie missing, run /login-local"
-      });
-    }
-
-    //--------------------------------------------------
-    // INTERCEPT NETWORK REQUESTS
-    //--------------------------------------------------
-    let finalLink = null;
-    page.on("response", async (response) => {
-      const url = response.url();
+    // Intercept network & capture request URL
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const u = req.url();
       if (
-        url.includes("data.terabox.app/file") ||
-        url.includes("download") ||
-        url.includes("uc?id=")
+        u.includes("data.terabox") ||
+        u.includes("download") ||
+        u.includes("file/") ||
+        u.includes("context") ||
+        u.includes(".app/")
       ) {
-        finalLink = url;
-        console.log("📩 Intercepted:", finalLink);
+        console.log("🎯 Captured:", u);
+        finalLink = u;
       }
+      req.continue().catch(() => {});
     });
 
-    //--------------------------------------------------
-    // 1️⃣ DIRECT DOWNLOAD BUTTON
-    //--------------------------------------------------
-    const clickTargets = [
-      "a[href*='download']", ".download-btn", ".btn-download", "#download",
-      "[data-testid='download']", "button[class*='download']"
+    // Load
+    await page.goto(target, { waitUntil: "domcontentloaded", timeout: 25000 });
+
+    // Try Clicking Download / Downloads
+    const buttons = [
+      "button:has-text('Download')",
+      "button:has-text('Downloads')",
+      "a:has-text('Download')",
+      "a:has-text('Downloads')"
     ];
-    for (let sel of clickTargets) {
-      if (await page.$(sel)) {
-        console.log("🖱 Clicking:", sel);
-        await page.click(sel).catch(() => {});
-        await new Promise(r => setTimeout(r, 6000));
-      }
+
+    for (const b of buttons) {
+      try {
+        await page.click(b);
+        break;
+      } catch {}
     }
 
-    //--------------------------------------------------
-    // 2️⃣ PREVIEW MODE → UNLOCK HIDDEN LINK
-    //--------------------------------------------------
-    if (!finalLink) {
-      const previewTargets = [
-        ".video-player", ".play-button", "video", ".preview-btn"
-      ];
-      for (let p of previewTargets) {
-        if (await page.$(p)) {
-          console.log("▶ Unlocking via preview:", p);
-          await page.click(p).catch(()=>{});
-          await new Promise(r => setTimeout(r, 6000));
-        }
-      }
-    }
+    // Let requests trigger
+    await page.waitForNetworkIdle({ idleTime: 1500, timeout: 20000 }).catch(()=>{});
+    await new Promise(r => setTimeout(r, 2500));
 
-    //--------------------------------------------------
-    // RETURN RESULT
-    //--------------------------------------------------
+    // Return result
     if (!finalLink) {
       return res.json({
-        error: "❌ Hidden link — cannot extract automatically",
-        fix: "Cloudflare or paywall preventing direct link"
+        error: "❌ Hidden or protected link.",
+        cause: "Needs proper login cookies or cannot extract automatically."
       });
     }
 
-    return res.json({
-      status: "🟢 Success",
-      link: finalLink
-    });
+    return res.json({ status: "🟢 Success", download: finalLink });
 
   } catch (err) {
-    return res.json({ error: "❌ Failed", details: err.message });
+    return res.json({ error: "❌ Failed", message: err.message });
   } finally {
     if (browser) await browser.close();
   }
 });
 
-//-----------------------------------
-// START SERVER
-//-----------------------------------
-app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Running on port ${PORT}`));
