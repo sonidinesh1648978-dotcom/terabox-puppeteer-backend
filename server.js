@@ -1,96 +1,123 @@
 import express from "express";
-import puppeteer from "puppeteer-core";
 import fs from "fs";
+import puppeteer from "puppeteer-core";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-const CHROME = "/usr/bin/chromium";
+const CHROME_PATH = "/usr/bin/chromium";
 const COOKIES_FILE = "cookies.json";
 
-function fixURL(url) {
+// ---------------- URL NORMALIZER ----------------
+function normalizeURL(url) {
   if (!url) return null;
-  return url
-    .trim()
-    .replace("teraboxurl.com", "1024terabox.com")
-    .replace("www.", "")
-    .replace(/https?:\/\/https?:\/\//gi, "https://");
-}
+  url = url.trim();
 
-app.get("/api", async (req, res) => {
-  let share = fixURL(req.query.url);
-  if (!share) return res.json({ error: "❌ Provide ?url=" });
-  console.log("➡️ Opening:", share);
+  // Fix doubled https
+  url = url.replace(/https?:\/\/https?:\/\//gi, "https://");
 
-  if (!fs.existsSync(COOKIES_FILE)) {
-    return res.json({
-      error: "❌ No cookies.json found",
-      fix: "Login locally first and upload cookies.json"
-    });
-  }
-
-  const cookies = JSON.parse(fs.readFileSync(COOKIES_FILE));
-
-  const browser = await puppeteer.launch({
-    executablePath: CHROME,
-    headless: "new",
-    args: [
-      "--no-sandbox",
-      "--disable-blink-features=AutomationControlled",
-      "--disable-dev-shm-usage",
-      "--disable-gpu"
-    ]
-  });
-
-  const page = await browser.newPage();
-  await page.setCookie(...cookies);
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+  // Convert all domains to correct host
+  url = url.replace(/https?:\/\/(www\.)?(teraboxurl|terabox|1024tera|1024terabox)\.com/gi,
+    "https://www.1024tera.com"
   );
 
-  let fileURL = null;
-  page.on("request", req2 => {
-    const u = req2.url();
-    if (u.includes("data.terabox.app") && u.includes("file")) {
-      fileURL = u;
-      console.log("🎯 Captured:", u);
-    }
+  // Extract surl if missing
+  const match = url.match(/s\/([^?]+)/);
+  if (match) {
+    return `https://www.1024tera.com/sharing/link?surl=${match[1]}&clearCache=1`;
+  }
+
+  return url;
+}
+
+// ---------------- SAFE BROWSER ----------------
+async function startBrowser() {
+  return await puppeteer.launch({
+    headless: "new",
+    executablePath: CHROME_PATH,
+    args: [
+      "--no-sandbox", "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-web-security",
+      "--window-size=1280,720"
+    ]
   });
+}
 
+// ---------------- API ROUTE ----------------
+app.get("/api", async (req, res) => {
+  let sharedLink = req.query.url;
+  if (!sharedLink) return res.json({ error: "❌ Provide link: ?url=" });
+
+  const url = normalizeURL(sharedLink);
+  console.log("🌍 Final URL:", url);
+
+  // Load cookies if available
+  let cookies = [];
+  if (fs.existsSync(COOKIES_FILE)) {
+    cookies = JSON.parse(fs.readFileSync(COOKIES_FILE));
+    console.log("🍪 Cookies Loaded");
+  }
+
+  let browser;
   try {
-    await page.goto(share, { waitUntil: "domcontentloaded", timeout: 25000 });
+    browser = await startBrowser();
+    const page = await browser.newPage();
 
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await page.waitForTimeout(4000);
+    // Apply cookies (optional login)
+    if (cookies.length) await page.setCookie(...cookies);
 
-    // try to unlock
-    const unlockSelectors = [
-      "text='Save to'",
-      "text='Download'",
-      ".vjs-big-play-button",
-      "video"
-    ];
-    for (let s of unlockSelectors) {
-      try { await page.click(s); } catch {}
+    await page.setExtraHTTPHeaders({
+      "Referer": "https://www.1024tera.com/",
+      "Accept-Language": "en-US,en;q=0.9",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Chrome/120.0"
+    });
+
+    let downloadURL = null;
+
+    // 🔍 Capture real download API from network
+    page.on("request", (req) => {
+      const reqUrl = req.url();
+
+      // Detect useful endpoints
+      if (
+        reqUrl.includes("download") ||
+        reqUrl.includes("get") && reqUrl.includes("file") ||
+        reqUrl.includes("data.terabox") ||
+        reqUrl.includes("file") && reqUrl.includes("sign")
+      ) {
+        console.log("🔎 Captured:", reqUrl);
+        downloadURL = reqUrl;
+      }
+    });
+
+    // ---------------- LOAD PAGE ----------------
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 }).catch(() => null);
+    await new Promise(r => setTimeout(r, 5000)); // Wait for analytics requests
+
+    // ---------------- RESULT ----------------
+    if (!downloadURL) {
+      return res.json({
+        error: "❌ Hidden link — requires login or Cloudflare pass",
+        note: "Manual login in browser may be required to store cookies.json"
+      });
     }
 
-    await page.waitForTimeout(6000);
-
-    if (fileURL) {
-      await browser.close();
-      return res.json({ status: "🟢 Success", download: fileURL });
-    }
-
-    await browser.close();
     return res.json({
-      error: "🔒 Hidden behind login or save requirement",
-      fix: "Open link manually once & click 'Save to TeraBox'"
+      status: "🟢 SUCCESS",
+      directLink: downloadURL
     });
 
   } catch (err) {
-    await browser.close();
+    console.log("❌ ERROR:", err.message);
     return res.json({ error: "❌ Failed", message: err.message });
+  } finally {
+    if (browser) await browser.close();
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Running on port ${PORT}`));
+// ---------------- RUN ----------------
+app.listen(PORT, () => {
+  console.log(`🚀 SERVER RUNNING ON PORT ${PORT}`);
+});
