@@ -1,142 +1,123 @@
 import express from "express";
-import puppeteer from "puppeteer-core";
-import path from "path";
 import fs from "fs";
+import puppeteer from "puppeteer-core";
 
 const app = express();
-const __dirname = path.resolve();
-const CHROME_PATH = "/usr/bin/chromium";
-const COOKIES_PATH = path.join(__dirname, "cookies.json");
+const PORT = process.env.PORT || 10000;
 
-// ------------------ URL NORMALIZER (FIXED) ------------------
+const CHROME_PATH = "/usr/bin/chromium";
+const COOKIES_FILE = "cookies.json";
+
+// ---------------- URL NORMALIZER ----------------
 function normalizeURL(url) {
   if (!url) return null;
   url = url.trim();
 
-  // Remove double protocol mistakes
+  // Fix doubled https
   url = url.replace(/https?:\/\/https?:\/\//gi, "https://");
 
-  // Remove "10241024" duplicate bug
-  url = url.replace(/1024https:\/\/1024/gi, "https://1024terabox.com");
+  // Convert all domains to correct host
+  url = url.replace(/https?:\/\/(www\.)?(teraboxurl|terabox|1024tera|1024terabox)\.com/gi,
+    "https://www.1024tera.com"
+  );
 
-  // Add missing https
-  if (!url.startsWith("http")) url = "https://" + url;
-
-  // Convert known short domains -> once only
-  url = url
-    .replace(/(https?:\/\/)?(www\.)?teraboxurl\.com/gi, "https://1024terabox.com")
-    .replace(/(https?:\/\/)?(www\.)?terabox\.com/gi, "https://1024terabox.com");
-
-  // Ensure final cleaned correct format
-  if (!url.startsWith("https://1024terabox.com")) {
-    url = url.replace(/^https?:\/\/[^/]+/, "https://1024terabox.com");
+  // Extract surl if missing
+  const match = url.match(/s\/([^?]+)/);
+  if (match) {
+    return `https://www.1024tera.com/sharing/link?surl=${match[1]}&clearCache=1`;
   }
 
   return url;
 }
 
-// ------------------ BROWSER LAUNCH (RENDER SAFE) ------------------
-async function launchBrowser() {
+// ---------------- SAFE BROWSER ----------------
+async function startBrowser() {
   return await puppeteer.launch({
     headless: "new",
     executablePath: CHROME_PATH,
-    ignoreHTTPSErrors: true,
     args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
+      "--no-sandbox", "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
-      "--single-process",
-      "--no-zygote",
-      "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
-      "--ignore-certificate-errors",
-      "--window-size=1280,720",
-      `--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36`,
-    ],
+      "--disable-web-security",
+      "--window-size=1280,720"
+    ]
   });
 }
 
-// ------------------ SAFE PAGE LOADING WITH RETRIES ------------------
-async function safeGoto(page, url) {
-  const modes = ["networkidle2", "domcontentloaded", "load"];
-  for (let m of modes) {
-    try {
-      console.log("⏳ Trying:", m);
-      await page.goto(url, { waitUntil: m, timeout: 60000 });
-      return true;
-    } catch (e) {
-      console.log("⚠️ Failed:", m);
-    }
-  }
-  return false;
-}
+// ---------------- API ROUTE ----------------
+app.get("/api", async (req, res) => {
+  let sharedLink = req.query.url;
+  if (!sharedLink) return res.json({ error: "❌ Provide link: ?url=" });
 
-// ------------------ DIAGNOSE ------------------
-app.get("/diagnose", async (req, res) => {
-  const cookies = fs.existsSync(COOKIES_PATH) ? "✅ Found" : "❌ Missing";
-  try {
-    const b = await launchBrowser();
-    await b.close();
-    return res.json({ chromiumPath: CHROME_PATH, cookies, status: "🟢 Chromium OK" });
-  } catch (e) {
-    return res.json({ chromiumPath: CHROME_PATH, cookies, status: "❌ Browser failed", error: e.message });
-  }
-});
-
-// ------------------ MAIN FETCH (NO CLICK, EXTRACT ONLY) ------------------
-app.get("/fetch", async (req, res) => {
-  let url = req.query.url;
-  if (!url) return res.json({ error: "❌ Missing ?url parameter" });
-
-  url = normalizeURL(url);
+  const url = normalizeURL(sharedLink);
   console.log("🌍 Final URL:", url);
 
-  const browser = await launchBrowser();
-  const page = await browser.newPage();
-
-  // load cookies if login exists
-  if (fs.existsSync(COOKIES_PATH)) {
-    try {
-      const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, "utf8"));
-      await page.setCookie(...cookies);
-      console.log("🍪 Cookies applied.");
-    } catch {}
+  // Load cookies if available
+  let cookies = [];
+  if (fs.existsSync(COOKIES_FILE)) {
+    cookies = JSON.parse(fs.readFileSync(COOKIES_FILE));
+    console.log("🍪 Cookies Loaded");
   }
 
-  // load page
-  const open = await safeGoto(page, url);
-  if (!open) {
-    await browser.close();
-    return res.json({ error: "❌ Navigation blocked or failed to load" });
-  }
+  let browser;
+  try {
+    browser = await startBrowser();
+    const page = await browser.newPage();
 
-  await page.waitForTimeout(5000);
+    // Apply cookies (optional login)
+    if (cookies.length) await page.setCookie(...cookies);
 
-  // extract direct file URL
-  const download = await page.evaluate(() => {
-    return [...document.querySelectorAll("a")]
-      .map(a => a.href)
-      .find(x => x.includes("data.") && x.includes("file/"));
-  });
-
-  if (!download) {
-    await browser.close();
-    return res.json({ 
-      error: "❌ No direct URL found",
-      reason: "Probably cookie expired. Run login-local.js again."
+    await page.setExtraHTTPHeaders({
+      "Referer": "https://www.1024tera.com/",
+      "Accept-Language": "en-US,en;q=0.9",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Chrome/120.0"
     });
+
+    let downloadURL = null;
+
+    // 🔍 Capture real download API from network
+    page.on("request", (req) => {
+      const reqUrl = req.url();
+
+      // Detect useful endpoints
+      if (
+        reqUrl.includes("download") ||
+        reqUrl.includes("get") && reqUrl.includes("file") ||
+        reqUrl.includes("data.terabox") ||
+        reqUrl.includes("file") && reqUrl.includes("sign")
+      ) {
+        console.log("🔎 Captured:", reqUrl);
+        downloadURL = reqUrl;
+      }
+    });
+
+    // ---------------- LOAD PAGE ----------------
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 }).catch(() => null);
+    await new Promise(r => setTimeout(r, 5000)); // Wait for analytics requests
+
+    // ---------------- RESULT ----------------
+    if (!downloadURL) {
+      return res.json({
+        error: "❌ Hidden link — requires login or Cloudflare pass",
+        note: "Manual login in browser may be required to store cookies.json"
+      });
+    }
+
+    return res.json({
+      status: "🟢 SUCCESS",
+      directLink: downloadURL
+    });
+
+  } catch (err) {
+    console.log("❌ ERROR:", err.message);
+    return res.json({ error: "❌ Failed", message: err.message });
+  } finally {
+    if (browser) await browser.close();
   }
-
-  const title = await page.title();
-  await browser.close();
-
-  return res.json({
-    success: true,
-    filename: title.replace(/[^\w.-]/g, "_") + ".mp4",
-    download
-  });
 });
 
-// ------------------ START SERVER ------------------
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("🚀 RUNNING on port", PORT));
+// ---------------- RUN ----------------
+app.listen(PORT, () => {
+  console.log(`🚀 SERVER RUNNING ON PORT ${PORT}`);
+});
