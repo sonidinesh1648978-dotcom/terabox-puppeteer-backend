@@ -1,56 +1,72 @@
+// auto-cookie-updater.js
 import fs from "fs";
+import os from "os";
 import puppeteer from "puppeteer-core";
 
-const CHROME_PATH = "/usr/bin/chromium"; // Render / Linux
 const COOKIES_FILE = "cookies.json";
-const LOGIN_URL = "https://www.1024tera.com/login";
+const LOGIN_URL = "https://www.1024tera.com";
 
-async function updateCookies() {
-  console.log("🚀 Launching browser for login...");
-  const browser = await puppeteer.launch({
-    headless: false, // 👈 MUST stay visible for manual login
-    executablePath: CHROME_PATH,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--window-size=1280,780"
-    ]
-  });
+// 🔍 Detect correct Chrome path
+let CHROME_PATH;
 
-  const page = await browser.newPage();
-  await page.goto(LOGIN_URL, { waitUntil: "networkidle2" });
+// Windows (Your PC)
+if (os.platform() === "win32") {
+  const paths = [
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+  ];
+  CHROME_PATH = paths.find(p => fs.existsSync(p));
 
-  console.log("🟡 Please log in manually...");
-  console.log("👉 After logging in, DO NOT close the browser yourself.");
-  console.log("⏳ The system will detect login and save cookies automatically.");
-
-  // 🔍 Check login every 3 seconds
-  const checkLogin = setInterval(async () => {
-    const isLoggedIn = await page.evaluate(() => {
-      return !!document.querySelector("img.avatar, .user-info, .nickname, .username");
-    });
-
-    if (isLoggedIn) {
-      clearInterval(checkLogin);
-
-      // 🟢 Save Cookies
-      const cookies = await page.cookies();
-      fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
-
-      console.log("🍪 Cookies updated successfully!");
-      console.log("💾 Saved to:", COOKIES_FILE);
-
-      // 🔐 Close after save
-      setTimeout(async () => {
-        await browser.close();
-        console.log("✅ Browser closed. Login complete.");
-        process.exit(0);
-      }, 3000);
-    }
-  }, 3000);
+  if (!CHROME_PATH) {
+    console.log("❌ Chrome not found on Windows!");
+    console.log("➡ Install Chrome or provide its path manually.");
+    process.exit(1);
+  }
 }
 
-updateCookies().catch(err => {
-  console.error("❌ Auto-cookie updater error:", err);
-});
+// Render / Linux server
+else {
+  CHROME_PATH = "/usr/bin/chromium";
+}
+
+console.log("🛰 Using Chrome path:", CHROME_PATH);
+
+
+async function updateCookies() {
+  try {
+    const browser = await puppeteer.launch({
+      headless: false,
+      executablePath: CHROME_PATH,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+
+    const page = await browser.newPage();
+    await page.goto(LOGIN_URL, { waitUntil: "networkidle2" });
+
+    console.log("\n🔐 Login manually, DO NOT CLOSE browser.");
+    console.log("⏳ Cookies will auto-save once login completes...\n");
+
+    const checkInterval = setInterval(async () => {
+      const loggedIn = await page.evaluate(() =>
+        !!document.querySelector("img.avatar, .user-info, .username, .nickname")
+      );
+
+      if (loggedIn) {
+        clearInterval(checkInterval);
+
+        const cookies = await page.cookies();
+        fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
+
+        console.log("🍪 Cookies saved to cookies.json");
+        await browser.close();
+        process.exit(0);
+      }
+    }, 3000);
+
+  } catch (err) {
+    console.log("\n❌ Auto-cookie updater failed:");
+    console.log(err.message);
+  }
+}
+
+updateCookies();
