@@ -16,7 +16,7 @@ const COOKIES_FILE = "./cookies.json";
 
   const page = await browser.newPage();
 
-  await page.goto("https://1024terabox.com", {
+  await page.goto("https://www.1024terabox.com", {
     waitUntil: "networkidle2",
     timeout: 0
   });
